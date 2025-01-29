@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arbitrage Monitor Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-900 text-white">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-8">Arbitrage Monitor Dashboard</h1>
+        
+        <!-- Stats Overview -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-sm">Total Opportunities</h3>
+                <p id="totalOpportunities" class="text-2xl font-bold">0</p>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-sm">Total Profit (ETH)</h3>
+                <p id="totalProfit" class="text-2xl font-bold">0.00</p>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-sm">Average Confidence</h3>
+                <p id="avgConfidence" class="text-2xl font-bold">0%</p>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-sm">Success Rate</h3>
+                <p id="successRate" class="text-2xl font-bold">0%</p>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl mb-4">Profit Over Time</h3>
+                <canvas id="profitChart"></canvas>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl mb-4">Market Activity</h3>
+                <canvas id="marketChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Recent Opportunities -->
+        <div class="bg-gray-800 p-4 rounded-lg mb-8">
+            <h3 class="text-xl mb-4">Recent Opportunities</h3>
+            <div class="overflow-x-auto">
+                <table class="min-w-full">
+                    <thead>
+                        <tr class="text-gray-400 text-left">
+                            <th class="p-2">Time</th>
+                            <th class="p-2">Path</th>
+                            <th class="p-2">Profit</th>
+                            <th class="p-2">Confidence</th>
+                            <th class="p-2">Gas</th>
+                            <th class="p-2">MEV Risk</th>
+                        </tr>
+                    </thead>
+                    <tbody id="opportunitiesTable">
+                        <!-- Opportunities will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let dashboardData = null;
+        const UPDATE_INTERVAL = 5000; // 5 seconds
+
+        // Initialize charts
+        const profitChart = new Chart(document.getElementById('profitChart'), {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Profit (ETH)',
+                    data: [],
+                    borderColor: '#10B981',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: '#374151'
+                        }
+                    },
+                    x: {
+                        grid: {
+                            color: '#374151'
+                        }
+                    }
+                }
+            }
+        });
+
+        const marketChart = new Chart(document.getElementById('marketChart'), {
+            type: 'bar',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Volume',
+                    data: [],
+                    backgroundColor: '#3B82F6'
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        grid: {
+                            color: '#374151'
+                        }
+                    },
+                    x: {
+                        grid: {
+                            color: '#374151'
+                        }
+                    }
+                }
+            }
+        });
+
+        function updateDashboard() {
+            fetch('/logs/dashboard_data.json')
+                .then(response => response.json())
+                .then(data => {
+                    dashboardData = data;
+                    updateStats();
+                    updateCharts();
+                    updateOpportunitiesTable();
+                })
+                .catch(error => console.error('Error fetching dashboard data:', error));
+        }
+
+        function updateStats() {
+            document.getElementById('totalOpportunities').textContent = dashboardData.stats.totalOpportunities;
+            document.getElementById('totalProfit').textContent = (Number(dashboardData.stats.totalProfit) / 1e18).toFixed(4);
+            document.getElementById('avgConfidence').textContent = (dashboardData.stats.averageConfidence * 100).toFixed(1) + '%';
+            
+            const successRate = dashboardData.stats.successfulTrades + dashboardData.stats.failedTrades > 0
+                ? (dashboardData.stats.successfulTrades / (dashboardData.stats.successfulTrades + dashboardData.stats.failedTrades) * 100).toFixed(1)
+                : '0.0';
+            document.getElementById('successRate').textContent = successRate + '%';
+        }
+
+        function updateCharts() {
+            // Update profit chart
+            const profitData = dashboardData.opportunities.map(opp => ({
+                time: new Date(opp.timestamp),
+                profit: Number(opp.profit)
+            }));
+
+            profitChart.data.labels = profitData.map(d => d.time.toLocaleTimeString());
+            profitChart.data.datasets[0].data = profitData.map(d => d.profit);
+            profitChart.update();
+
+            // Update market chart
+            if (dashboardData.marketConditions.length > 0) {
+                const latestMarket = dashboardData.marketConditions[dashboardData.marketConditions.length - 1];
+                marketChart.data.labels = latestMarket.pools.map(p => `${p.token0.slice(0,6)}...${p.token1.slice(0,6)}`);
+                marketChart.data.datasets[0].data = latestMarket.pools.map(p => Number(p.volume));
+                marketChart.update();
+            }
+        }
+
+        function updateOpportunitiesTable() {
+            const table = document.getElementById('opportunitiesTable');
+            table.innerHTML = '';
+
+            // Get last 10 opportunities, reversed to show newest first
+            const recentOpps = [...dashboardData.opportunities].reverse().slice(0, 10);
+
+            recentOpps.forEach(opp => {
+                const row = document.createElement('tr');
+                row.className = 'border-t border-gray-700';
+                row.innerHTML = `
+                    <td class="p-2">${new Date(opp.timestamp).toLocaleTimeString()}</td>
+                    <td class="p-2">${opp.path}</td>
+                    <td class="p-2">${Number(opp.profit).toFixed(4)} ETH</td>
+                    <td class="p-2">${(opp.confidence * 100).toFixed(1)}%</td>
+                    <td class="p-2">${opp.gasEstimate}</td>
+                    <td class="p-2">${opp.mevRisk.type} (${(opp.mevRisk.riskScore * 100).toFixed(1)}%)</td>
+                `;
+                table.appendChild(row);
+            });
+        }
+
+        // Initial update and start polling
+        updateDashboard();
+        setInterval(updateDashboard, UPDATE_INTERVAL);
+    </script>
+</body>
+</html> 

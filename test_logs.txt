@@ -1,0 +1,45 @@
+[2025-01-28T05:47:40.953Z] TEST: Starting test run...
+[2025-01-28T05:47:40.954Z] TEST: Initializing test environment
+[2025-01-28T05:47:40.955Z] TEST: Starting arbitrage monitoring test
+[2025-01-28T05:47:40.955Z] TEST: Test cycle 1
+[2025-01-28T05:47:40.957Z] OPPORTUNITY: Found arbitrage opportunity
+{
+  "route": "Uniswap -> Sushiswap",
+  "profit": "0.05",
+  "confidence": 0.95,
+  "amountIn": "1"
+}
+[2025-01-28T05:47:41.978Z] TEST: Test cycle 2
+[2025-01-28T05:47:41.980Z] OPPORTUNITY: Found arbitrage opportunity
+{
+  "route": "Uniswap -> Sushiswap",
+  "profit": "0.05",
+  "confidence": 0.95,
+  "amountIn": "1"
+}
+[2025-01-28T05:47:42.986Z] TEST: Test cycle 3
+[2025-01-28T05:47:42.987Z] OPPORTUNITY: Found arbitrage opportunity
+{
+  "route": "Uniswap -> Sushiswap",
+  "profit": "0.05",
+  "confidence": 0.95,
+  "amountIn": "1"
+}
+[2025-01-28T05:47:43.995Z] TEST: Testing predefined scenarios
+[2025-01-28T05:47:43.995Z] TEST: Testing profitable scenario
+{
+  "tokenIn": "USDC",
+  "tokenOut": "WETH",
+  "expectedProfit": "0.05",
+  "route": [
+    "Uniswap",
+    "Sushiswap"
+  ]
+}
+[2025-01-28T05:47:43.996Z] TEST: Profitable scenario results
+{
+  "profit": "0.05",
+  "route": "Uniswap -> Sushiswap",
+  "success": true
+}
+[2025-01-28T05:47:43.997Z] TEST: Test run completed

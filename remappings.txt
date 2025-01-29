@@ -1,0 +1,5 @@
+@openzeppelin/=node_modules/@openzeppelin/
+@openzeppelin/contracts/token/ERC721/IERC721Metadata.sol=@openzeppelin/contracts/token/ERC721/extensions/IERC721Metadata.sol
+@openzeppelin/contracts/token/ERC721/IERC721Enumerable.sol=@openzeppelin/contracts/token/ERC721/extensions/IERC721Enumerable.sol
+@uniswap/=node_modules/@uniswap/
+@aave/=node_modules/@aave/ 
