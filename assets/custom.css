@@ -1,0 +1,72 @@
+
+body {
+    background-color: #1a1a1a;
+    color: #ffffff;
+    font-family: Arial, sans-serif;
+}
+
+.status-row {
+    display: flex;
+    justify-content: space-between;
+    margin: 20px;
+}
+
+.status-box {
+    background-color: #2a2a2a;
+    border-radius: 10px;
+    padding: 15px;
+    width: 30%;
+    text-align: center;
+}
+
+.main-view {
+    display: flex;
+    justify-content: space-between;
+    margin: 20px;
+}
+
+.panel {
+    width: 48%;
+    background-color: #2a2a2a;
+    border-radius: 10px;
+    padding: 15px;
+}
+
+.chart {
+    margin-bottom: 20px;
+}
+
+.analytics-view {
+    display: flex;
+    justify-content: space-between;
+    margin: 20px;
+}
+
+.bottom-panel {
+    width: 48%;
+    background-color: #2a2a2a;
+    border-radius: 10px;
+    padding: 15px;
+}
+
+.opportunities-view {
+    margin: 20px;
+    background-color: #2a2a2a;
+    border-radius: 10px;
+    padding: 15px;
+}
+
+.opportunities-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.opportunities-table th, .opportunities-table td {
+    padding: 10px;
+    text-align: left;
+    border-bottom: 1px solid #3a3a3a;
+}
+
+.opportunities-table th {
+    background-color: #3a3a3a;
+}

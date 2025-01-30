@@ -1,17 +1,98 @@
-node_modules
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
 .env
+.venv
+env/
+venv/
+ENV/
 
-# Hardhat files
-/cache
-/artifacts
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# TypeChain files
-/typechain
-/typechain-types
+# Project specific
+models/
+logs/
+*.log
+.DS_Store
 
-# solidity-coverage files
-/coverage
-/coverage.json
+# Credentials and secrets
+.env
+config.ini
+secrets.json
 
-# Hardhat Ignition default folder for deployments against a local node
-ignition/deployments/chain-31337
+# Sensitive Configuration Files
+test_credentials_backup.json
+*.key
+private_keys.txt
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Test Configuration with Sensitive Data
+test_config.py
+*_config.py
+!test_config.template.py
+
+# Logs
+debug.log
+error.log
+*.log.*
+
+# Telegram Bot
+telegram_token.txt
+bot_config.json
+telegram_credentials.json
+bot_session.json
+
+# Blockchain
+wallet_info.json
+node_modules/
+.secret
+*.wallet
+keystore/
+geth/
+chaindata/
+
+# Test Data
+test_data/
+*.db
+*.sqlite3
+*.sqlite
+
+# Backup files
+*.bak
+*.backup
+*~
+*.old
+*.save
+
+# Cache
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
