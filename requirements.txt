@@ -1,20 +1,45 @@
-web3==6.15.1
-aiohttp==3.9.3
-dash==2.14.2
-dash-bootstrap-components==1.5.0
-pandas==2.2.0
-numpy==1.26.3
-python-dotenv==1.0.1
-python-telegram-bot==20.7
-scikit-learn==1.4.0
-torch==2.2.0
-requests==2.31.0
-plotly==5.18.0
-flask==3.0.1
-werkzeug==3.0.1
-python-binance==1.0.19
-ccxt==4.2.15
-eth-abi==4.2.1
-eth-account==0.10.0
-eth-typing==3.5.2
-eth-utils==2.3.1 
+# Core dependencies
+python-telegram-bot>=20.7
+web3>=6.0.0
+aiohttp>=3.8.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+dash>=2.9.0
+plotly>=5.13.0
+torch>=2.0.0
+defillama>=2.3.0
+tenacity>=8.2.0
+cryptography>=41.0.0
+cachetools>=5.3.0
+structlog>=23.1.0
+prometheus_client
+
+# Development dependencies
+pytest>=7.3.0
+pytest-asyncio>=0.21.0
+python-dotenv>=1.0.0
+black>=23.3.0
+flake8>=6.0.0
+
+# Blockchain specific
+eth-typing>=3.0.0
+eth-utils>=2.1.0
+eth-abi>=4.0.0
+
+# Dashboard dependencies
+dash-bootstrap-components>=1.5.0
+python-binance>=1.0.19
+ccxt>=4.2.15
+flask>=3.0.1
+werkzeug>=3.0.1
+scikit-learn>=1.4.0
+requests>=2.31.0
+
+# Hugging Face dependencies
+transformers>=4.30.0
+datasets>=2.12.0
+accelerate>=0.20.0
+sentencepiece>=0.1.99
+protobuf>=4.23.0 

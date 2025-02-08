@@ -3,19 +3,56 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 from web3 import Web3
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union, Callable, Any, AsyncGenerator, Coroutine, TypeVar, Literal
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from eth_typing import Address
+from eth_typing import Address, HexStr, ChecksumAddress
 from web3.contract import Contract
+from web3.exceptions import ContractLogicError, TransactionNotFound
 import aiohttp
 import json
-from defillama import DefiLlama
-from visualization import ArbitrageVisualizer
 import os
-from telegram_bot import telegram_bot
-import ssl
+from dotenv import load_dotenv
+from eth_abi.abi import encode, decode
+from eth_utils.address import to_checksum_address
+from eth_utils.currency import to_wei, from_wei
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+import time
+from decimal import Decimal
+import gc
+from tenacity import retry, stop_after_attempt, wait_exponential
+import threading
+import networkx as nx
+from functools import wraps
+from dataclasses import dataclass
+from cachetools import cached, TTLCache
+import signal
+import sys
+import statistics
+from web3.types import TxReceipt, Wei
+from aiohttp import ClientSession
+import math
+from typing import Literal
+from enum import Enum, auto
+from src.core.web3_config import get_web3, get_async_web3
+
+# Type Aliases
+TokenAddress = str
+DexName = str
+FlashLoanProviderType = Literal['aave', 'balancer', 'radiant']
+TokenPair = Tuple[TokenAddress, TokenAddress]
+
+MarketDataType = Dict[str, Union[float, str, Dict[str, Any]]]
+OpportunityType = Dict[str, Union[str, float, TokenPair, Dict[str, Any]]]
+FlashLoanOpportunityType = Dict[str, Union[
+    str,  # id, type, timestamp
+    TokenPair,  # token_pair
+    float,  # amount, provider_score, fees, profits
+    FlashLoanProviderType,  # flash_loan_provider
+    Dict[str, Any]  # provider_metrics
+]]
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -23,11 +60,247 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Load environment variables
+load_dotenv()
+
+# Custom Exception Classes
+class ArbitrageError(Exception):
+    """Base exception class for arbitrage operations"""
+    pass
+
+class ValidationError(ArbitrageError):
+    """Validation related errors"""
+    pass
+
+class ExecutionError(ArbitrageError):
+    """Execution related errors"""
+    pass
+
+class NetworkError(ArbitrageError):
+    """Network and connection related errors"""
+    pass
+
+class ConfigurationError(ArbitrageError):
+    """Configuration and setup related errors"""
+    pass
+
+def retry_async(retries: int = 3, delay: int = 1):
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> Any:
+            for attempt in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    await asyncio.sleep(delay * (2 ** attempt))
+            return None
+        return wrapper
+    return decorator
+
+def validate_input(validator: Callable) -> Callable:
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> Any:
+            if not await validator(*args, **kwargs):
+                raise ValidationError("Input validation failed")
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+class TimeSeriesFeatures:
+    def __init__(self, window_size: int = 100, cleanup_threshold: int = 1000):
+        self.window_size = window_size
+        self.cleanup_threshold = cleanup_threshold
+        self.price_history = []
+        self.volume_history = []
+        self.last_cleanup = datetime.now()
+        
+    def update(self, price: float, volume: float):
+        self.price_history.append(price)
+        self.volume_history.append(volume)
+        
+        # Enforce window size limit
+        if len(self.price_history) > self.window_size:
+            self.price_history = self.price_history[-self.window_size:]
+            self.volume_history = self.volume_history[-self.window_size:]
+        
+        # Periodic cleanup
+        if len(self.price_history) > self.cleanup_threshold:
+            self._cleanup()
+            
+    def _cleanup(self):
+        if (datetime.now() - self.last_cleanup).total_seconds() < 3600:  # Once per hour
+            return
+            
+        self.price_history = self.price_history[-self.window_size:]
+        self.volume_history = self.volume_history[-self.window_size:]
+        self.last_cleanup = datetime.now()
+        
+    def get_features(self) -> torch.Tensor:
+        if len(self.price_history) < 2:
+            return torch.zeros(5)
+            
+        returns = np.diff(self.price_history) / self.price_history[:-1]
+        volatility = np.std(returns) * np.sqrt(365 * 24 * 60)
+        volume_ma = np.mean(self.volume_history[-24:]) if len(self.volume_history) >= 24 else 0
+        volume_trend = volume_ma / np.mean(self.volume_history) if len(self.volume_history) > 0 else 0
+        
+        return torch.tensor([
+            volatility,
+            volume_trend,
+            self._calculate_momentum(),
+            self._calculate_relative_strength(),
+            self._calculate_liquidity_depth()
+        ])
+        
+    def _calculate_momentum(self) -> float:
+        if len(self.price_history) < 2:
+            return 0
+        return (self.price_history[-1] / self.price_history[0]) - 1
+        
+    def _calculate_relative_strength(self) -> float:
+        if len(self.price_history) < 14:
+            return 0.0
+        gains = []
+        losses = []
+        for i in range(1, len(self.price_history)):
+            change = self.price_history[i] - self.price_history[i-1]
+            if change >= 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(-change)
+        avg_gain = float(np.mean(gains[-14:]))
+        avg_loss = float(np.mean(losses[-14:]))
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return float(100.0 - (100.0 / (1.0 + rs)))
+        
+    def _calculate_liquidity_depth(self) -> float:
+        if len(self.volume_history) < 24:
+            return 0.0
+        mean_volume = float(np.mean(self.volume_history[-24:]))
+        std_volume = float(np.std(self.volume_history[-24:]))
+        return mean_volume / std_volume if std_volume > 0 else 0.0
+
+class CrossChainAnalyzer:
+    def __init__(self):
+        self.eth_correlation = []
+        self.l2_metrics = {}
+        
+    def analyze_opportunities(self, token_pair: Tuple[str, str]) -> Dict:
+        return {
+            'eth_correlation': self._calculate_eth_correlation(),
+            'l2_gas_efficiency': self._calculate_l2_efficiency(),
+            'bridge_liquidity': self._get_bridge_liquidity(),
+            'cross_chain_volume': self._get_cross_chain_volume()
+        }
+        
+    def _calculate_eth_correlation(self) -> float:
+        if len(self.eth_correlation) < 2:
+            return 0
+        return np.corrcoef(self.eth_correlation)[0, 1]
+        
+    def _calculate_l2_efficiency(self) -> float:
+        gas_savings = 0.85  # Base typically saves 85% on gas compared to L1
+        return gas_savings * self._get_l2_multiplier()
+        
+    def _get_bridge_liquidity(self) -> float:
+        return 0.0  # Implement bridge liquidity analysis
+        
+    def _get_cross_chain_volume(self) -> float:
+        return 0.0  # Implement cross-chain volume analysis
+        
+    def _get_l2_multiplier(self) -> float:
+        return 1.2  # Base has good efficiency due to OP Stack
+
+class MEVProtection:
+    def __init__(self):
+        self.sandwich_threshold = 0.02  # 2% price impact threshold
+        self.frontrun_threshold = 0.01  # 1% slippage threshold
+        
+    def calculate_mev_risk(self, trade_params: Dict) -> Dict:
+        """Calculate MEV risk metrics for a trade"""
+        return {
+            'sandwich_risk': self._estimate_sandwich_risk(trade_params),
+            'frontrunning_risk': self._estimate_frontrunning_risk(trade_params),
+            'backrunning_risk': self._estimate_backrunning_risk(trade_params),
+            'optimal_block_position': self._calculate_optimal_block_position(trade_params)
+        }
+        
+    def _estimate_sandwich_risk(self, trade_params: Dict) -> float:
+        return min(trade_params.get('price_impact', 0) / self.sandwich_threshold, 1.0)
+        
+    def _estimate_frontrunning_risk(self, trade_params: Dict) -> float:
+        return min(trade_params.get('slippage', 0) / self.frontrun_threshold, 1.0)
+        
+    def _estimate_backrunning_risk(self, trade_params: Dict) -> float:
+        volume = trade_params.get('volume_24h', 0)
+        return 1.0 / (1.0 + volume/1e6) if volume > 0 else 1.0
+        
+    def _calculate_optimal_block_position(self, trade_params: Dict) -> int:
+        gas_price = trade_params.get('gas_price', 0)
+        return 1 if gas_price > 100 else 0  # First position if gas price is high
+
+class GasOptimizer:
+    def __init__(self):
+        self.base_fee_history = []
+        self.priority_fee_history = []
+        
+    def optimize_execution(self, trade_params: Dict) -> Dict:
+        return {
+            'optimal_gas_price': self._calculate_optimal_gas_price(),
+            'base_fee_prediction': self._predict_base_fee_next_blocks(),
+            'priority_fee_strategy': self._calculate_priority_fee(),
+            'block_space_analysis': self._analyze_block_space()
+        }
+        
+    def _calculate_optimal_gas_price(self) -> int:
+        return max(self.base_fee_history[-1] * 1.2 if self.base_fee_history else 0, 1)
+        
+    def _predict_base_fee_next_blocks(self) -> List[int]:
+        return self.base_fee_history[-5:] if self.base_fee_history else []
+        
+    def _calculate_priority_fee(self) -> int:
+        return int(np.mean(self.priority_fee_history[-10:]) if self.priority_fee_history else 1)
+        
+    def _analyze_block_space(self) -> Dict:
+        return {'utilization': 0.8, 'congestion': 'medium'}
+
+class TokenEconomicsAnalyzer:
+    def __init__(self):
+        self.supply_history = {}
+        self.holder_data = {}
+        
+    def analyze_token_metrics(self, token: str) -> Dict:
+        return {
+            'supply_dynamics': self._analyze_supply_changes(token),
+            'holder_concentration': self._analyze_holder_distribution(token),
+            'vesting_schedules': self._track_vesting_events(token),
+            'protocol_revenue': self._analyze_protocol_revenue(token)
+        }
+        
+    def _analyze_supply_changes(self, token: str) -> Dict:
+        return {'inflation_rate': 0.0, 'burn_rate': 0.0, 'circulating_ratio': 0.8}
+        
+    def _analyze_holder_distribution(self, token: str) -> Dict:
+        return {'top_holders_share': 0.0, 'gini_coefficient': 0.5}
+        
+    def _track_vesting_events(self, token: str) -> List:
+        return []
+        
+    def _analyze_protocol_revenue(self, token: str) -> Dict:
+        return {'revenue_30d': 0.0, 'revenue_growth': 0.0}
+
 class ArbitrageNetwork(nn.Module):
     """Enhanced neural network for predicting arbitrage opportunities"""
-    def __init__(self, input_size: int = 12, hidden_size: int = 128):
+    def __init__(self, input_size: int = 24, hidden_size: int = 128):
         super().__init__()
-        # Main prediction network
+        # Main prediction network with enhanced features
         self.network = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
@@ -38,1193 +311,813 @@ class ArbitrageNetwork(nn.Module):
             nn.Linear(hidden_size // 2, 3)  # [profit_prediction, confidence, risk_score]
         )
         
-        # DEX attention mechanism
-        self.dex_attention = nn.Sequential(
-            nn.Linear(input_size, 32),
-            nn.Tanh(),
-            nn.Linear(32, 10)  # Attention weights for supported DEXes
-        )
-        
-    def forward(self, x):
-        # Main prediction
-        predictions = self.network(x)
-        
-        # DEX attention weights
-        dex_weights = torch.softmax(self.dex_attention(x), dim=1)
-        
-        return predictions, dex_weights
-
-class SuperchainArbitrageAgent(nn.Module):
-    """Advanced AI agent for discovering and executing arbitrage opportunities on Superchain"""
-    
-    # Enhanced DEX support with configurations
-    supported_dexes = {
-        'uniswap_v3': {
-            'address': '0x8aD414D56502Ec3Ea68B3968F5396C8dEB2f3CC8',  # Base Uniswap V3 Factory
-            'type': 'UniswapV3',
-            'fee_tiers': [100, 500, 3000, 10000],
-            'router': '0x2626664c2603336E57B271c5C0b26F421741e481'  # Base Uniswap V3 Router
-        },
-        'sushiswap': {
-            'address': '0xc35DADB65012eC5796536bD9864eD8773aBc74C4',  # Base SushiSwap Factory
-            'type': 'UniswapV2',
-            'fee': 300,  # 0.3%
-            'router': '0x6BDED42c6DA8FD5E8B11852d05271A5241e32594'  # Base SushiSwap Router
-        },
-        'baseswap': {
-            'address': '0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB',  # BaseSwap Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86'  # BaseSwap Router
-        },
-        'aerodrome': {
-            'address': '0x420DD381b31aEf6683db6B902084cB0FFEe076d6',  # Aerodrome Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43'  # Aerodrome Router
-        },
-        'pancakeswap': {
-            'address': '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',  # Base PancakeSwap Factory
-            'type': 'UniswapV2',
-            'fee': 250,  # 0.25%
-            'router': '0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86'  # Base PancakeSwap Router
-        },
-        'swapbased': {
-            'address': '0x36905172C5D3C7A2e91c6819A27A1Ab346A0aeEE',  # SwapBased Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86'  # SwapBased Router
-        },
-        'alienbase': {
-            'address': '0x3E84D913803b02A4a7f027165E8cA42C14C0FdE7',  # AlienBase Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0xb0505d78A2A6d49fA6E4905BA9D6efC472B642C2'  # AlienBase Router
-        },
-        'maverick': {
-            'address': '0x32D02Fc7722E81F6Ac6bD1b70Ef5277eD3566fb9',  # Maverick Factory
-            'type': 'UniswapV3',
-            'fee_tiers': [100, 500, 3000, 10000],
-            'router': '0x32D02Fc7722E81F6Ac6bD1b70Ef5277eD3566fb9'  # Maverick Router
-        },
-        'synthswap': {
-            'address': '0x9B2Cc8e6a2Bbb56d6bE4682891a91B0e48633F96',  # SynthSwap Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0x5589D08c49cDddF48bB9f6E648c587d5D4533B28'  # SynthSwap Router
-        },
-        'horizon_dex': {
-            'address': '0x0F633F78147b933B743d2d660A56BA3Ff5683C24',  # Horizon DEX Factory
-            'type': 'UniswapV2',
-            'fee': 300,
-            'router': '0xE8C1365E4EF99F8Bf69c5Bb34Ea54b622A43f367'  # Horizon DEX Router
-        }
-    }
-    
-    def __init__(self, web3_provider: str, model_params=None):
-        super().__init__()
-        # Initialize Web3 with Base RPC endpoint
-        self.web3_provider = "https://mainnet.base.org"
-        self.web3 = Web3(Web3.HTTPProvider(self.web3_provider))
-        self.defillama_client = DefiLlama()
-        
-        # Initialize dex_analytics
-        self.dex_analytics = {
-            dex_name: {
-                'tokens': set(),
-                'liquidity': {},
-                'volume': {},
-                'pairs': set()
-            }
-            for dex_name in self.supported_dexes.keys()
-        }
-        
-        # Initialize training components with provided parameters
-        if model_params is not None:
-            self.optimizer = torch.optim.Adam(model_params, lr=0.001)
-        else:
-            # Initialize default model if no parameters provided
-            self.model = nn.Sequential(
-                nn.Linear(10, 64),
-                nn.ReLU(),
-                nn.Linear(64, 32),
-                nn.ReLU(),
-                nn.Linear(32, 1)
-            )
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
-            
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='max', factor=0.5, patience=5
-        )
-        self.criterion = nn.MSELoss()
-        
-        # Enhanced data collection
-        self.training_buffer = {
-            'features': [],
-            'labels': [],
-            'timestamps': [],
-            'market_conditions': [],
-            'execution_results': []
-        }
-        self.buffer_size = 10000  # Keep last 10000 data points
-        self.min_samples_for_training = 100
-        
-        # Adaptive learning settings
-        self.adaptive_settings = {
-            'learning_rate': 0.001,
-            'batch_size': 32,
-            'training_frequency': 100,  # Train every 100 new data points
-            'validation_split': 0.2,
-            'early_stopping_patience': 5,
-            'min_delta': 0.001
-        }
-        
-        # Performance tracking
-        self.performance_metrics = {
-            'training_losses': [],
-            'validation_losses': [],
-            'prediction_accuracy': [],
-            'profit_history': [],
-            'risk_adjusted_returns': []
-        }
-        
-        # Flash loan configurations
-        self.flash_loan_providers = {
-            'aave': {
-                'address': '0x...',  # Aave lending pool address
-                'router': '0x...',   # Aave router
-                'min_amount': 0.1,   # Minimum flash loan amount in ETH
-                'fee': 0.0009       # 0.09% fee
-            },
-            'balancer': {
-                'address': '0x...',  # Balancer vault address
-                'router': '0x...',   # Balancer router
-                'min_amount': 0.05,  # Minimum amount
-                'fee': 0.0001       # 0.01% fee
-            },
-            'dodo': {
-                'address': '0x...',  # DODO vault address
-                'router': '0x...',   # DODO router
-                'min_amount': 0.01,  # Minimum amount
-                'fee': 0.0002       # 0.02% fee
-            }
-        }
-        
-        # Flash loan specific settings
-        self.flash_loan_settings = {
-            'min_profit_threshold': 0.005,  # 0.5% minimum profit after fees
-            'max_loan_amount': 1000,        # Maximum flash loan in ETH
-            'min_loan_amount': 0.1,         # Minimum flash loan in ETH
-            'max_routes': 3,                # Maximum number of DEX routes
-            'preferred_providers': ['aave', 'balancer'],  # Preferred flash loan providers
-            'max_gas_impact': 0.2,          # Maximum gas impact on profit
-            'min_net_profit_usd': 50        # Minimum profit in USD after all fees
-        }
-        
-        # Neural network layers
-        self.feature_extractor = nn.Sequential(
-            nn.Linear(12, 64),
+        # Market Sentiment Analysis
+        self.sentiment_network = nn.Sequential(
+            nn.Linear(8, 32),
             nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU()
+            nn.Dropout(0.2),
+            nn.Linear(32, 16)
         )
         
-        self.prediction_head = nn.Linear(32, 3)  # profit, confidence, risk
-        self.dex_attention = nn.Linear(32, 10)  # 10 supported DEXes
-        
-        self.model = ArbitrageNetwork()
-        self.training_data = []
-        self.performance_history = []
-        self.telegram_bot = telegram_bot
-        
-        # Token discovery and analysis settings
-        self.token_discovery = {
-            'min_liquidity': 50000,  # Minimum liquidity in USD
-            'min_holders': 100,      # Minimum number of holders
-            'min_age_days': 3,       # Minimum token age in days
-            'blacklisted_tokens': set(),  # Known scam tokens
-            'discovered_tokens': {},  # Tracked tokens and their metrics
-            'pair_history': {}       # Historical performance of token pairs
-        }
-        
-        # Risk management settings
-        self.risk_settings = {
-            'min_confidence': 0.85,
-            'max_risk_score': 0.3,
-            'min_profit_threshold': 0.002,  # 0.2%
-            'min_sharpe_ratio': 1.5,
-            'max_drawdown': 0.1,
-            'volatility_threshold': 0.02,
-            'min_liquidity_usd': 50000,
-            'max_price_impact': 0.01,  # 1%
-            'max_slippage': 0.005     # 0.5%
-        }
-        
-        # Initialize visualizer
-        self.visualizer = ArbitrageVisualizer()
-        self.visualizer.run_in_thread()
-        
-    def forward(self, x):
-        """Forward pass through the network"""
-        x = self.feature_extractor(x)
-        predictions = self.prediction_head(x)
-        dex_weights = torch.softmax(self.dex_attention(x), dim=0)  # Change dim=1 to dim=0 for 1D input
-        return predictions, dex_weights
-        
-    async def close(self):
-        """Close any open connections"""
-        try:
-            if hasattr(self.web3.provider, 'close'):
-                await self.web3.provider.close()
-        except Exception as e:
-            logger.error(f"Error closing web3 provider: {str(e)}")
-        
-    async def fetch_market_data(self) -> Dict:
-        """Enhanced market data fetching with TVL and token metrics"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                tasks = []
-                
-                # Fetch DEX data with retries
-                for dex_name, dex_info in self.supported_dexes.items():
-                    task = self.fetch_dex_data_with_retry(session, dex_name, dex_info)
-                    tasks.append(task)
-                
-                # Fetch TVL data with timeout
-                tvl_task = asyncio.wait_for(self.fetch_tvl_data(), timeout=10)
-                tasks.append(tvl_task)
-                
-                # Fetch token discovery data with timeout
-                discovery_task = asyncio.wait_for(self.discover_new_tokens(session), timeout=15)
-                tasks.append(discovery_task)
-                
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Filter out failed requests
-                dex_data = [r for r in results[:-2] if not isinstance(r, Exception)]
-                tvl_data = results[-2] if not isinstance(results[-2], Exception) else {}
-                new_tokens = results[-1] if not isinstance(results[-1], Exception) else []
-                
-                return {
-                    'dex_data': dex_data,
-                    'tvl_data': tvl_data,
-                    'new_tokens': new_tokens,
-                    'timestamp': datetime.now().isoformat()
-                }
-        except Exception as e:
-            logger.error(f"Error in fetch_market_data: {str(e)}")
-            return {
-                'dex_data': [],
-                'tvl_data': {},
-                'new_tokens': [],
-                'timestamp': datetime.now().isoformat(),
-                'error': str(e)
-            }
-            
-    async def fetch_tvl_data(self) -> Dict:
-        """Fetch TVL data from DeFiLlama"""
-        try:
-            tvl_data = {}
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            connector = aiohttp.TCPConnector(ssl=ssl_context)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                for dex_name in self.supported_dexes:
-                    try:
-                        async with session.get(f"https://api.llama.fi/protocol/{dex_name}") as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                tvl_data[dex_name] = data.get('tvl', 0)
-                            else:
-                                logger.warning(f"Failed to fetch TVL for {dex_name}: {response.status}")
-                                tvl_data[dex_name] = 0
-                    except Exception as e:
-                        logger.error(f"Error fetching TVL for {dex_name}: {str(e)}")
-                        tvl_data[dex_name] = 0
-            return tvl_data
-        except Exception as e:
-            logger.error(f"Error fetching TVL data: {str(e)}")
-            return {}
-            
-    async def discover_new_tokens(self, session: aiohttp.ClientSession) -> List[Dict]:
-        """Enhanced token discovery with security checks"""
-        try:
-            new_tokens = []
-            
-            # Fetch new token listings from various sources
-            # Implement token discovery logic here
-            
-            # Analyze each new token
-            for token in new_tokens:
-                if await self.validate_token(token):
-                    self.token_discovery['discovered_tokens'][token['address']] = {
-                        'symbol': token['symbol'],
-                        'discovery_time': datetime.now(),
-                        'liquidity': token['liquidity'],
-                        'holders': token['holders'],
-                        'score': await self.calculate_token_score(token)
-                    }
-            
-            return new_tokens
-        except Exception as e:
-            logger.error(f"Error in token discovery: {str(e)}")
-            return []
-            
-    async def validate_token(self, token: Dict) -> bool:
-        """Enhanced token validation with comprehensive checks"""
-        try:
-            # Basic requirements check
-            if (token['liquidity'] < self.token_discovery['min_liquidity'] or
-                token['holders'] < self.token_discovery['min_holders'] or
-                token['address'] in self.token_discovery['blacklisted_tokens']):
-                return False
-            
-            # Contract security checks
-            contract_security = await self.check_contract_security(token['address'])
-            if not contract_security['is_safe']:
-                self.token_discovery['blacklisted_tokens'].add(token['address'])
-                return False
-            
-            # Additional validation checks
-            if not await self.validate_token_extended(token):
-                return False
-            
-            # Token age check
-            creation_time = await self.get_token_creation_time(token['address'])
-            if (datetime.now() - creation_time) < timedelta(days=self.token_discovery['min_age_days']):
-                return False
-            
-            # Trading volume check
-            if not await self.check_trading_volume(token):
-                return False
-            
-            return True
-        except Exception as e:
-            logger.error(f"Error validating token {token.get('symbol', 'unknown')}: {str(e)}")
-            return False
-            
-    async def analyze_opportunity(self, 
-                                token_pair: Tuple[str, str],
-                                amount: float,
-                                market_data: Dict) -> Dict:
-        """Enhanced opportunity analysis with advanced metrics"""
-        # Prepare input features
-        features = torch.tensor([
-            amount,
-            market_data['price_impact'],
-            market_data['liquidity'],
-            market_data['volatility'],
-            market_data['gas_price'],
-            market_data['block_time'],
-            market_data['price_difference'],
-            market_data['volume_24h'],
-            market_data['tvl'],
-            market_data['token_score'],
-            market_data['market_sentiment'],
-            market_data['network_congestion']
-        ], dtype=torch.float32)
-        
-        # Get model predictions and DEX weights
-        with torch.no_grad():
-            predictions, dex_weights = self.model(features)
-            profit_pred, confidence, risk_score = predictions.numpy()
-            
-        # Calculate additional metrics
-        metrics = self.calculate_advanced_metrics(
-            profit_pred, confidence, risk_score, market_data
+        # Historical Performance Analysis
+        self.historical_lstm = nn.LSTM(
+            input_size=8,
+            hidden_size=32,
+            num_layers=2,
+            dropout=0.2,
+            batch_first=True
         )
         
-        opportunity = {
-            'id': f"opp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hash(str(token_pair))}",
-            'profit_prediction': float(profit_pred),
-            'confidence': float(confidence),
-            'risk_score': float(risk_score),
-            'token_pair': token_pair,
-            'amount': amount,
-            'timestamp': datetime.now().isoformat(),
-            'gas_price': market_data['gas_price'],
-            'volume_24h': market_data['volume_24h'],
-            'dex_weights': dex_weights.numpy().tolist(),
-            'metrics': metrics,
-            'type': 'DEX Arbitrage',
-            'tokens_involved': list(token_pair),
-            'expected_profit': float(profit_pred),
-            'gas_cost': market_data['gas_price'] * 21000,  # Estimate gas cost
-            'price_impact': market_data['price_impact'],
-            'slippage': market_data.get('slippage', 0),
-            'liquidity': market_data['liquidity'],
-            'volatility': market_data.get('volatility', 0)
-        }
-        
-        # Notify via Telegram bot
-        await self.telegram_bot.notify_opportunity(opportunity)
-        
-        return opportunity
-        
-    def calculate_advanced_metrics(self, profit_pred: float, confidence: float, 
-                                 risk_score: float, market_data: Dict) -> Dict:
-        """Calculate advanced trading metrics"""
-        return {
-            'sharpe_ratio': self.calculate_sharpe_ratio(profit_pred, market_data),
-            'sortino_ratio': self.calculate_sortino_ratio(profit_pred, market_data),
-            'profit_factor': self.calculate_profit_factor(),
-            'win_rate': self.calculate_win_rate(),
-            'expected_value': profit_pred * confidence * (1 - risk_score),
-            'risk_adjusted_return': profit_pred / (risk_score + 1e-6),
-            'market_impact': self.estimate_market_impact(market_data),
-            'execution_probability': self.estimate_execution_probability(market_data)
-        }
-        
-    async def execute_arbitrage(self, opportunity: Dict) -> bool:
-        """Enhanced arbitrage execution with safety checks"""
-        if not self.telegram_bot.is_trade_profitable(opportunity):
-            return False
-            
-        try:
-            # Prepare transaction with optimal path
-            flash_loan_params = await self.prepare_flash_loan(
-                token_pair=opportunity['token_pair'],
-                amount=opportunity['amount'],
-                dex_weights=opportunity['dex_weights']
-            )
-            
-            # Execute with advanced safety checks
-            trade_result = await self.safe_execute_transaction(flash_loan_params)
-            
-            # Prepare trade execution notification
-            trade_execution = {
-                'id': opportunity['id'],
-                'type': opportunity['type'],
-                'status': 'completed' if trade_result['success'] else 'failed',
-                'profit': trade_result.get('profit', 0),
-                'gas_used': trade_result.get('gas_used', 0),
-                'execution_time': trade_result.get('execution_time', 0),
-                'error': trade_result.get('error'),
-                'tokens_involved': opportunity['tokens_involved']
-            }
-            
-            # Notify execution status and update performance
-            await self.telegram_bot.notify_trade_execution(trade_execution)
-            self.telegram_bot.update_performance(trade_execution)
-            
-            if trade_result['success']:
-                await self.record_success(opportunity)
-                return True
-                
-        except Exception as e:
-            logger.error(f"Arbitrage execution failed: {str(e)}")
-            await self.record_failure(opportunity, str(e))
-            
-        return False
-        
-    def validate_opportunity(self, opportunity: Dict) -> bool:
-        """Validate opportunity against risk settings"""
-        return (
-            opportunity['confidence'] > self.risk_settings['min_confidence'] and
-            opportunity['risk_score'] < self.risk_settings['max_risk_score'] and
-            opportunity['profit_prediction'] > self.risk_settings['min_profit_threshold'] and
-            opportunity['metrics']['sharpe_ratio'] > self.risk_settings['min_sharpe_ratio'] and
-            opportunity['metrics']['execution_probability'] > 0.9
+        # Cross-Chain Analysis
+        self.cross_chain_network = nn.Sequential(
+            nn.Linear(12, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 16)
         )
         
-    async def analyze_flash_loan_opportunity(self, 
-                                          token_pair: Tuple[str, str],
-                                          amount: float,
-                                          market_data: Dict) -> Dict:
-        """Analyze potential flash loan arbitrage opportunity"""
+        # MEV Protection
+        self.mev_protection = nn.Sequential(
+            nn.Linear(8, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 4)  # [sandwich_risk, frontrun_risk, backrun_risk, block_position]
+        )
+        
+        # Gas Optimization
+        self.gas_optimizer = nn.Sequential(
+            nn.Linear(6, 24),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(24, 4)  # [optimal_gas, base_fee_pred, priority_fee, block_space]
+        )
+        
+        # Liquidity Analysis
+        self.liquidity_analyzer = nn.Sequential(
+            nn.Linear(10, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 16)
+        )
+        
+        # Token Economics
+        self.token_economics = nn.Sequential(
+            nn.Linear(12, 32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(32, 8)
+        )
+        
+    def forward(self, x, market_data=None):
+        """Forward pass with market data validation"""
+        if market_data is None:
+            raise ValueError("market_data is required for prediction")
+            
+        # Validate required features
+        required_features = {
+            'sentiment': (8,),
+            'historical': (1, 8, 8),
+            'cross_chain': (12,),
+            'mev': (8,),
+            'gas': (6,),
+            'liquidity': (10,),
+            'token_economics': (12,)
+        }
+        
+        for feature, expected_shape in required_features.items():
+            if feature not in market_data:
+                raise ValueError(f"Missing required feature: {feature}")
+            if market_data[feature].shape[-len(expected_shape):] != expected_shape:
+                raise ValueError(f"Invalid shape for {feature}: expected {expected_shape}, got {market_data[feature].shape}")
+        
+        # Extract features from different components
+        sentiment_features = self.sentiment_network(market_data['sentiment'])
+        
+        # Process historical data through LSTM
+        historical_output, _ = self.historical_lstm(market_data['historical'])
+        historical_features = historical_output[:, -1, :]  # Take last output
+        
+        # Cross-chain analysis
+        cross_chain_features = self.cross_chain_network(market_data['cross_chain'])
+        
+        # MEV protection analysis
+        mev_features = self.mev_protection(market_data['mev'])
+        
+        # Gas optimization
+        gas_features = self.gas_optimizer(market_data['gas'])
+        
+        # Liquidity analysis
+        liquidity_features = self.liquidity_analyzer(market_data['liquidity'])
+        
+        # Token economics
+        token_features = self.token_economics(market_data['token_economics'])
+        
+        # Combine all features
+        combined_features = torch.cat([
+            x,
+            sentiment_features,
+            historical_features,
+            cross_chain_features,
+            mev_features,
+            gas_features,
+            liquidity_features,
+            token_features
+        ], dim=1)
+        
+        # Get predictions
+        predictions = self.network(combined_features)
+        
+        return predictions
+
+class DefiLlamaIntegration:
+    def __init__(self):
+        self.client = DefiLlama()
+        self.cache_duration = 300  # 5 minutes cache
+        self.tvl_cache = {}
+        self.volume_cache = {}
+        
+    async def get_protocol_data(self, protocol_slug: str) -> Dict:
+        """Get comprehensive protocol data from DeFiLlama"""
         try:
-            # Calculate flash loan fees for each provider
-            provider_fees = {
-                name: amount * config['fee']
-                for name, config in self.flash_loan_providers.items()
+            current_time = datetime.now().timestamp()
+            if (protocol_slug in self.tvl_cache and 
+                current_time - self.tvl_cache[protocol_slug]['timestamp'] < self.cache_duration):
+                return self.tvl_cache[protocol_slug]['data']
+            
+            protocol_data = await self.client.get_protocol(protocol_slug)
+            tvl_data = await self.client.get_protocol_tvl(protocol_slug)
+            
+            data = {
+                'tvl': protocol_data.get('tvl', 0),
+                'volume_24h': protocol_data.get('volume24h', 0),
+                'fees_24h': protocol_data.get('fees24h', 0),
+                'mcap_tvl': protocol_data.get('mcapTvl', 0),
+                'historical_tvl': tvl_data,
+                'timestamp': current_time
             }
             
-            # Get the best provider based on fees
-            best_provider = min(provider_fees.items(), key=lambda x: x[1])
-            
-            # Calculate potential profit with flash loan
-            features = torch.tensor([
-                amount,
-                market_data['price_impact'],
-                market_data['liquidity'],
-                market_data['volatility'],
-                market_data['gas_price'],
-                market_data['block_time'],
-                market_data['price_difference'],
-                market_data['volume_24h'],
-                market_data['tvl'],
-                market_data['token_score'],
-                market_data['market_sentiment'],
-                market_data['network_congestion']
-            ], dtype=torch.float32)
-            
-            # Get model predictions
-            with torch.no_grad():
-                predictions, dex_weights = self.model(features)
-                profit_pred, confidence, risk_score = predictions.numpy()
-            
-            # Calculate net profit after flash loan fees
-            flash_loan_fee = best_provider[1]
-            gas_cost = market_data['gas_price'] * 300000  # Higher gas estimate for flash loans
-            net_profit = profit_pred - flash_loan_fee - gas_cost
-            
-            opportunity = {
-                'id': f"flash_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{hash(str(token_pair))}",
-                'type': 'Flash Loan Arbitrage',
-                'token_pair': token_pair,
-                'amount': amount,
-                'flash_loan_provider': best_provider[0],
-                'flash_loan_fee': flash_loan_fee,
-                'gross_profit': profit_pred,
-                'net_profit': net_profit,
-                'gas_cost': gas_cost,
-                'confidence': float(confidence),
-                'risk_score': float(risk_score),
-                'dex_weights': dex_weights.numpy().tolist(),
-                'timestamp': datetime.now().isoformat(),
-                'metrics': self.calculate_advanced_metrics(profit_pred, confidence, risk_score, market_data)
+            self.tvl_cache[protocol_slug] = {
+                'data': data,
+                'timestamp': current_time
             }
             
-            return opportunity
+            return data
             
         except Exception as e:
-            logger.error(f"Error analyzing flash loan opportunity: {str(e)}")
+            logger.error(f"Error fetching DeFiLlama data for {protocol_slug}: {str(e)}")
             return None
             
-    async def execute_flash_loan(self, opportunity: Dict) -> bool:
-        """Execute flash loan arbitrage"""
+    async def get_pool_data(self, pool_address: str, chain: str = 'base') -> Dict:
+        """Get pool-specific data from DeFiLlama"""
         try:
-            provider = self.flash_loan_providers[opportunity['flash_loan_provider']]
-            
-            # Prepare flash loan parameters
-            flash_params = {
-                'token': opportunity['token_pair'][0],
-                'amount': opportunity['amount'],
-                'provider_address': provider['address'],
-                'router': provider['router'],
-                'dex_routes': self.get_optimal_dex_route(opportunity['dex_weights'])
+            pool_data = await self.client.get_pool(pool_address, chain)
+            return {
+                'liquidity': pool_data.get('liquidity', 0),
+                'apy': pool_data.get('apy', 0),
+                'volume_24h': pool_data.get('volume24h', 0),
+                'fee_apy': pool_data.get('feeApy', 0)
             }
-            
-            # Build flash loan transaction
-            flash_tx = await self.build_flash_loan_transaction(flash_params)
-            
-            # Execute with safety checks
-            if await self.validate_flash_loan_safety(flash_tx):
-                result = await self.safe_execute_transaction(flash_tx)
-                
-                # Prepare execution notification
-                execution = {
-                    'id': opportunity['id'],
-                    'type': 'Flash Loan Arbitrage',
-                    'status': 'completed' if result['success'] else 'failed',
-                    'profit': result.get('profit', 0),
-                    'gas_used': result.get('gas_used', 0),
-                    'execution_time': result.get('execution_time', 0),
-                    'error': result.get('error'),
-                    'flash_loan_provider': opportunity['flash_loan_provider']
-                }
-                
-                # Notify execution status
-                await self.telegram_bot.notify_trade_execution(execution)
-                self.telegram_bot.update_performance(execution)
-                
-                return result['success']
-                
-            return False
-            
         except Exception as e:
-            logger.error(f"Flash loan execution failed: {str(e)}")
-            return False
+            logger.error(f"Error fetching pool data for {pool_address}: {str(e)}")
+            return None
             
-    def validate_flash_loan_safety(self, flash_tx: Dict) -> bool:
-        """Validate flash loan transaction safety"""
+    async def get_token_data(self, token_address: str, chain: str = 'base') -> Dict:
+        """Get token-specific data from DeFiLlama"""
         try:
-            # Verify flash loan parameters
-            if flash_tx['amount'] < self.flash_loan_settings['min_loan_amount']:
-                return False
-                
-            if flash_tx['amount'] > self.flash_loan_settings['max_loan_amount']:
-                return False
-                
-            # Verify expected profit meets minimum threshold
-            if flash_tx['expected_profit'] < self.flash_loan_settings['min_profit_threshold']:
-                return False
-                
-            # Verify gas impact
-            gas_impact = flash_tx['gas_cost'] / flash_tx['expected_profit']
-            if gas_impact > self.flash_loan_settings['max_gas_impact']:
-                return False
-                
-            # Verify net profit meets minimum USD threshold
-            if flash_tx['net_profit_usd'] < self.flash_loan_settings['min_net_profit_usd']:
-                return False
-                
-            return True
-            
+            token_data = await self.client.get_token(token_address, chain)
+            return {
+                'price': token_data.get('price', 0),
+                'market_cap': token_data.get('marketCap', 0),
+                'volume_24h': token_data.get('volume24h', 0),
+                'liquidity': token_data.get('liquidity', 0)
+            }
         except Exception as e:
-            logger.error(f"Error validating flash loan safety: {str(e)}")
-            return False
-            
-    async def monitor_superchain(self):
-        """Enhanced continuous monitoring focusing on flash loan opportunities"""
-        while True:
+            logger.error(f"Error fetching token data: {str(e)}")
+            return None
+
+class RateLimiter:
+    def __init__(self, calls_per_second: float = 1.0):
+        self.calls_per_second = calls_per_second
+        self.min_interval = 1.0 / calls_per_second
+        self.last_call_time = 0.0
+        self.lock = asyncio.Lock()
+        
+    async def wait(self):
+        async with self.lock:
+            current_time = time.time()
+            time_since_last_call = current_time - self.last_call_time
+            if time_since_last_call < self.min_interval:
+                await asyncio.sleep(self.min_interval - time_since_last_call)
+            self.last_call_time = time.time()
+
+class GasManager:
+    def __init__(self, web3: Web3):
+        self.web3 = web3
+        self.gas_price_history = []
+        self.max_history = 1000
+        self.update_interval = 10  # seconds
+        self.last_update = 0
+        
+    async def get_optimal_gas_price(self) -> int:
+        current_time = time.time()
+        if current_time - self.last_update > self.update_interval:
             try:
-                if self.telegram_bot.system_paused:
-                    await asyncio.sleep(5)
-                    continue
+                base_fee = self.web3.eth.get_block('latest')['baseFeePerGas']
+                max_priority_fee = self.web3.eth.max_priority_fee
+                gas_price = base_fee + max_priority_fee
+                
+                self.gas_price_history.append({
+                    'timestamp': current_time,
+                    'price': gas_price
+                })
+                
+                if len(self.gas_price_history) > self.max_history:
+                    self.gas_price_history.pop(0)
                     
-                # Fetch market data
-                market_data = await self.fetch_market_data()
-                
-                # First, look for flash loan opportunities
-                flash_opportunities = []
-                for token_pair in self.get_viable_pairs():
-                    for amount in self.get_optimal_flash_loan_amounts(token_pair, market_data):
-                        opportunity = await self.analyze_flash_loan_opportunity(
-                            token_pair=token_pair,
-                            amount=amount,
-                            market_data=market_data
-                        )
-                        if opportunity:
-                            flash_opportunities.append(opportunity)
-                
-                # Execute profitable flash loan opportunities
-                for opportunity in self.prioritize_opportunities(flash_opportunities):
-                    if self.validate_flash_loan_safety(opportunity):
-                        if self.telegram_bot.auto_trade:
-                            await self.execute_flash_loan(opportunity)
-                
-                # Only look for regular arbitrage if no flash loan opportunities
-                if not flash_opportunities:
-                    regular_opportunities = []
-                    for token_pair in self.get_viable_pairs():
-                        opportunity = await self.analyze_opportunity(
-                            token_pair=token_pair,
-                            amount=self.get_optimal_regular_amount(token_pair, market_data),
-                            market_data=market_data
-                        )
-                        # Only consider opportunities with guaranteed profit
-                        if opportunity and opportunity['confidence'] > 0.95 and opportunity['risk_score'] < 0.1:
-                            regular_opportunities.append(opportunity)
-                    
-                    # Execute regular opportunities with guaranteed profit
-                    for opportunity in self.prioritize_opportunities(regular_opportunities):
-                        if self.telegram_bot.is_trade_profitable(opportunity):
-                            if self.telegram_bot.auto_trade:
-                                await self.execute_arbitrage(opportunity)
-                
-                await asyncio.sleep(1)  # Rate limiting
+                self.last_update = current_time
                 
             except Exception as e:
-                logger.error(f"Monitoring error: {str(e)}")
-                await asyncio.sleep(5)
+                logger.error(f"Error updating gas price: {str(e)}")
+                if self.gas_price_history:
+                    gas_price = self.gas_price_history[-1]['price']
+                else:
+                    gas_price = self.web3.eth.gas_price
+                    
+        return gas_price
+
+class HuggingFaceInterface:
+    """Interface for HuggingFace-based analysis and interaction"""
+    
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or os.getenv('HF_API_KEY')
+        self.api_url = "https://api-inference.huggingface.co/models/"
+        self.headers = {"Authorization": f"Bearer {self.api_key}"}
+        self.summary_model = "facebook/bart-large-cnn"
+        self.analysis_model = "bigscience/bloom"
+        
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def generate_summary(self, performance_data: Dict) -> str:
+        """Generate a summary of agent's performance using BART"""
+        try:
+            prompt = self._create_summary_prompt(performance_data)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.api_url}{self.summary_model}",
+                    headers=self.headers,
+                    json={"inputs": prompt, "parameters": {"max_length": 150, "min_length": 50}}
+                ) as response:
+                    result = await response.json()
+                    
+            if isinstance(result, list) and len(result) > 0:
+                return result[0]['summary_text']
+            return "Error generating summary"
+            
+        except Exception as e:
+            logger.error(f"Error generating summary: {e}")
+            return "Error generating summary"
+            
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def process_training_suggestion(self, suggestion: str, current_params: Dict) -> Dict:
+        """Process user suggestion using BLOOM"""
+        try:
+            prompt = self._create_training_prompt(suggestion, current_params)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.api_url}{self.analysis_model}",
+                    headers=self.headers,
+                    json={
+                        "inputs": prompt,
+                        "parameters": {
+                            "max_length": 200,
+                            "temperature": 0.3,
+                            "return_full_text": False
+                        }
+                    }
+                ) as response:
+                    result = await response.json()
+                    
+            return self._parse_training_response(result[0]['generated_text'])
+            
+        except Exception as e:
+            logger.error(f"Error processing training suggestion: {e}")
+            return {}
+            
+    def _create_summary_prompt(self, data: Dict) -> str:
+        """Create prompt for performance summary"""
+        return f"""Summarize the following trading performance:
+        Total Trades: {data.get('total_trades', 0)}
+        Success Rate: {data.get('success_rate', 0):.2f}%
+        Total Profit: {data.get('total_profit', 0):.4f} ETH
+        Average Gas Cost: {data.get('avg_gas_cost', 0):.4f} ETH
+        Best Trade: {data.get('best_trade', 'N/A')}
+        Market Conditions: {data.get('market_conditions', 'N/A')}
+        
+        Focus on key metrics, trends, and actionable insights."""
+        
+    def _create_training_prompt(self, suggestion: str, current_params: Dict) -> str:
+        """Create prompt for processing training suggestions"""
+        return f"""Given the following trading bot parameters and user suggestion, provide parameter adjustments in JSON format.
+        
+        Current Parameters:
+        {json.dumps(current_params, indent=2)}
+        
+        User Suggestion: {suggestion}
+        
+        Respond with a JSON object containing only the parameters that should be adjusted. Example:
+        {{"learning_rate": 0.001, "batch_size": 64}}"""
+        
+    def _parse_training_response(self, response: str) -> Dict:
+        """Parse model response into parameter adjustments"""
+        try:
+            # Find JSON in response
+            start = response.find('{')
+            end = response.rfind('}') + 1
+            if start >= 0 and end > start:
+                json_str = response[start:end]
+                return json.loads(json_str)
+            return {}
+        except Exception as e:
+            logger.error(f"Error parsing training response: {e}")
+            return {}
+
+class FlashLoanArbitrageInterface:
+    def __init__(self, web3: Web3, contract_address: str, private_key: str):
+        self.web3 = web3
+        self.contract_address = contract_address
+        self.private_key = private_key
+        self.contract = self.web3.eth.contract(
+            address=contract_address,
+            abi=self._load_contract_abi()
+        )
+        
+    def _load_contract_abi(self) -> List:
+        try:
+            with open('abis/flash_loan_arbitrage.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading flash loan ABI: {str(e)}")
+            return []
+
+class MarketAnalyzer:
+    """Consolidated market analysis functionality"""
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.price_history = []
+        self.volume_history = []
+        
+    @retry_async()
+    async def analyze_market(self, token_pair: Tuple[str, str], amount: float) -> Dict:
+        """Comprehensive market analysis"""
+        return {
+            'time_series': self._analyze_time_series(),
+            'cross_chain': await self._analyze_cross_chain(token_pair),
+            'mev_risk': await self._analyze_mev_risk(amount),
+            'gas': await self._optimize_gas(),
+            'economics': await self._analyze_token_economics(token_pair)
+        }
+        
+    def _analyze_time_series(self) -> Dict:
+        return {
+            'momentum': self._calculate_momentum(),
+            'rsi': self._calculate_relative_strength(),
+            'liquidity': self._calculate_liquidity_depth()
+        }
+        
+    async def _analyze_cross_chain(self, token_pair: Tuple[str, str]) -> Dict:
+        return {
+            'eth_correlation': self._calculate_eth_correlation(),
+            'l2_efficiency': self._calculate_l2_efficiency(),
+            'bridge_liquidity': await self._get_bridge_liquidity(),
+            'volume': await self._get_cross_chain_volume()
+        }
+        
+    async def _analyze_mev_risk(self, amount: float) -> Dict:
+        return {
+            'sandwich_risk': self._estimate_sandwich_risk({'amount': amount}),
+            'frontrunning_risk': self._estimate_frontrunning_risk({'amount': amount}),
+            'backrunning_risk': self._estimate_backrunning_risk({'amount': amount}),
+            'optimal_position': self._calculate_optimal_block_position({'amount': amount})
+        }
+        
+    async def _optimize_gas(self) -> Dict:
+        return {
+            'optimal_price': self._calculate_optimal_gas_price(),
+            'predicted_base_fee': self._predict_base_fee_next_blocks(),
+            'priority_fee': self._calculate_priority_fee(),
+            'block_space': self._analyze_block_space()
+        }
+        
+    async def _analyze_token_economics(self, token_pair: Tuple[str, str]) -> Dict:
+        return {
+            'supply_changes': self._analyze_supply_changes(token_pair[0]),
+            'holder_distribution': self._analyze_holder_distribution(token_pair[0]),
+            'vesting_events': self._track_vesting_events(token_pair[0]),
+            'protocol_revenue': self._analyze_protocol_revenue(token_pair[0])
+        }
+
+class SuperchainArbitrageAgent:
+    """Main arbitrage agent using composition of specialized components"""
+    
+    def __init__(self, config_path: str = 'config.json'):
+        """Initialize arbitrage agent with configuration"""
+        # Load configuration
+        self.config_path = config_path
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Get Web3 from centralized provider
+        self.web3 = get_web3()
+        logger.info("Using centralized Web3 provider")
+        
+        # Initialize components using composition
+        self.market_analyzer = MarketAnalyzer()
+        self.model = ArbitrageModel(self.device)
+        self.training_manager = TrainingManager(self.model, self.device)
+        self.transaction_validator = TransactionValidator()
+        self.transaction_builder = TransactionBuilder(self.web3)
+        self.execution_engine = ExecutionEngine(
+            web3=self.web3,
+            gas_manager=self.gas_manager,
+            market_validator=self.market_validator
+        )
+        
+        # Initialize monitoring
+        self.monitoring = {
+            'active_executions': 0,
+            'total_executions': 0,
+            'successful_executions': 0,
+            'failed_executions': 0,
+            'total_profit': 0.0,
+            'total_gas_used': 0
+        }
+        
+        # Thread safety
+        self._execution_lock = asyncio.Lock()
+        self.execution_semaphore = asyncio.Semaphore(3)
+        
+    async def analyze_opportunity(
+        self,
+        token_pair: TokenPair,
+        amount: float,
+        market_data: MarketDataType
+    ) -> Optional[OpportunityType]:
+        """Analyze arbitrage opportunity using market analyzer and model"""
+        try:
+            # Monitor market conditions
+            self.market_analyzer.monitor_volatility(market_data)
+            
+            # Get market analysis with caching
+            market_analysis = await self._cached_market_analysis(token_pair, amount)
+            
+            # Get model predictions with error handling
+            predictions = await self._get_model_predictions(market_data)
+            if predictions is None:
+                logger.warning("Model predictions returned None")
+                return None
                 
-    def prioritize_opportunities(self, opportunities: List[Dict]) -> List[Dict]:
-        """Prioritize opportunities based on multiple factors"""
+            # Adjust confidence based on volatility
+            confidence = float(predictions['confidence'])
+            volatility_factor = self.market_analyzer.get_volatility_adjustment()
+            adjusted_confidence = confidence * volatility_factor
+            
+            return {
+                'token_pair': token_pair,
+                'amount': amount,
+                'predicted_profit': float(predictions['market_analysis'].mean()),
+                'confidence': adjusted_confidence,
+                'risk_score': float(predictions['risk_assessment'].mean()),
+                'execution_strategy': predictions['execution_strategy'].tolist(),
+                'market_analysis': market_analysis
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing opportunity: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
+    @cached(cache=TTLCache(maxsize=100, ttl=60))  # Cache for 60 seconds
+    async def _cached_market_analysis(
+        self,
+        token_pair: TokenPair,
+        amount: float
+    ) -> Dict:
+        """Cached market analysis to reduce RPC calls"""
+        return await self.market_analyzer.analyze_market(token_pair, amount)
+
+    async def _get_model_predictions(
+        self,
+        market_data: MarketDataType
+    ) -> Optional[Dict]:
+        """Get model predictions with error handling"""
+        try:
+            with torch.no_grad():
+                predictions = self.model(market_data)
+            return predictions
+        except Exception as e:
+            logger.error(f"Error getting model predictions: {str(e)}")
+            return None
+
+    async def execute_arbitrage(
+        self,
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType]
+    ) -> ExecutionResult:
+        """Execute arbitrage using execution engine with enhanced error handling"""
+        try:
+            async with self._execution_lock:
+                async with self.execution_semaphore:
+                    try:
+                        start_time = time.time()
+                        self.active_executions += 1
+                        
+                        # Revalidate market conditions
+                        validation_result = await self.validate_market_conditions(opportunity)
+                        if not validation_result.is_valid:
+                            logger.warning(f"Market conditions changed: {validation_result.reason}")
+                            return ExecutionResult(
+                                status=ExecutionStatus.MARKET_CONDITIONS_CHANGED,
+                                success=False,
+                                error_message=validation_result.reason
+                            )
+                        
+                        # Execute with retry logic
+                        execution_result = await self._execute_with_retry(opportunity)
+                        execution_time = time.time() - start_time
+                        
+                        if execution_result.success:
+                            await self._update_execution_metrics(execution_result)
+                            return ExecutionResult(
+                                status=ExecutionStatus.SUCCESS,
+                                success=True,
+                                gas_used=execution_result.gas_used,
+                                execution_time=execution_time,
+                                tx_hash=execution_result.tx_hash
+                            )
+                        else:
+                            return ExecutionResult(
+                                status=ExecutionStatus.EXECUTION_ERROR,
+                                success=False,
+                                error_message=execution_result.error_message,
+                                execution_time=execution_time
+                            )
+                            
+                    finally:
+                        self.active_executions -= 1
+                        
+        except Exception as e:
+            error_msg = f"Error executing arbitrage: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            await self.record_failure(opportunity, error_msg)
+            
+            return ExecutionResult(
+                status=ExecutionStatus.NETWORK_ERROR,
+                success=False,
+                error_message=error_msg
+            )
+
+    async def validate_market_conditions(
+        self,
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType],
+        max_price_movement: float = 0.02,  # 2% max price movement
+        min_liquidity_ratio: float = 0.8,  # 80% of original liquidity
+        max_gas_increase: float = 1.5  # 50% max gas increase
+    ) -> MarketValidationResult:
+        """Validate current market conditions before execution with enhanced checks"""
+        try:
+            # Get current price with caching
+            current_price = await self._get_cached_price(opportunity['token_pair'])
+            entry_price = opportunity.get('entry_price', current_price)
+            price_change = abs(current_price - entry_price) / entry_price
+            
+            if price_change > max_price_movement:
+                return MarketValidationResult(
+                    is_valid=False,
+                    reason=f"Price moved {price_change*100:.2f}% since opportunity detection",
+                    current_price=current_price,
+                    price_change=price_change
+                )
+            
+            # Check liquidity with caching
+            current_liquidity = await self._get_cached_liquidity(opportunity['token_pair'])
+            min_required_liquidity = opportunity.get('min_required_liquidity', current_liquidity * min_liquidity_ratio)
+            
+            if current_liquidity < min_required_liquidity:
+                return MarketValidationResult(
+                    is_valid=False,
+                    reason=f"Insufficient liquidity: {current_liquidity} < {min_required_liquidity}",
+                    current_liquidity=current_liquidity
+                )
+            
+            # Check gas price with caching
+            current_gas = await self._get_cached_gas_price()
+            original_gas = opportunity.get('gas_price', current_gas)
+            
+            if current_gas > original_gas * max_gas_increase:
+                return MarketValidationResult(
+                    is_valid=False,
+                    reason=f"Gas price too high: {current_gas} > {original_gas * max_gas_increase}",
+                    current_gas=current_gas
+                )
+            
+            # Check network conditions
+            network_status = await self._check_network_status()
+            if not network_status['is_healthy']:
+                return MarketValidationResult(
+                    is_valid=False,
+                    reason=f"Network issues: {network_status['reason']}",
+                    network_status=network_status
+                )
+            
+            # Volatility check
+            if hasattr(self, 'volatility_history') and self.volatility_history:
+                recent_volatility = statistics.mean([
+                    v for _, v in self.volatility_history[-5:]  # Last 5 readings
+                ])
+                if recent_volatility > self.VOLATILITY_THRESHOLD:
+                    return MarketValidationResult(
+                        is_valid=False,
+                        reason=f"High market volatility: {recent_volatility:.4f}",
+                        network_status={'volatility': recent_volatility}
+                    )
+            
+            # All conditions valid
+            return MarketValidationResult(
+                is_valid=True,
+                current_price=current_price,
+                price_change=price_change,
+                current_liquidity=current_liquidity,
+                current_gas=current_gas,
+                network_status=network_status
+            )
+            
+        except Exception as e:
+            error_msg = f"Error validating market conditions: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            return MarketValidationResult(
+                is_valid=False,
+                reason=error_msg
+            )
+
+    @cached(cache=TTLCache(maxsize=100, ttl=30))  # Cache for 30 seconds
+    async def _get_cached_price(self, token_pair: TokenPair) -> float:
+        """Get cached token price"""
+        return await self.get_current_price(token_pair)
+
+    @cached(cache=TTLCache(maxsize=100, ttl=30))
+    async def _get_cached_liquidity(self, token_pair: TokenPair) -> float:
+        """Get cached liquidity"""
+        return await self.get_current_liquidity(token_pair)
+
+    @cached(cache=TTLCache(maxsize=1, ttl=5))  # Short cache for gas price
+    async def _get_cached_gas_price(self) -> int:
+        """Get cached gas price"""
+        return await self.gas_manager.get_optimal_gas_price()
+
+    async def _check_network_status(self) -> Dict[str, Any]:
+        """Check network health status"""
+        try:
+            # Get latest block with timeout
+            latest_block = await asyncio.wait_for(
+                self.web3.eth.get_block('latest'),
+                timeout=5.0
+            )
+            
+            # Check block timestamp
+            block_delay = time.time() - latest_block['timestamp']
+            if block_delay > 60:  # More than 1 minute delay
+                return {
+                    'is_healthy': False,
+                    'reason': f"Block delay: {block_delay:.1f}s"
+                }
+            
+            # Check pending transactions
+            pending_tx_count = await self.web3.eth.get_block_transaction_count('pending')
+            if pending_tx_count > 10000:  # High pending tx count
+                return {
+                    'is_healthy': False,
+                    'reason': f"High pending transactions: {pending_tx_count}"
+                }
+            
+            return {
+                'is_healthy': True,
+                'block_number': latest_block['number'],
+                'block_delay': block_delay,
+                'pending_tx_count': pending_tx_count
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking network status: {str(e)}")
+            return {
+                'is_healthy': False,
+                'reason': f"Network error: {str(e)}"
+            }
+
+    async def _update_execution_metrics(self, result: ExecutionResult):
+        """Update execution metrics for monitoring"""
+        self.monitoring['total_executions'] += 1
+        if result.success:
+            self.monitoring['successful_executions'] += 1
+        else:
+            self.monitoring['failed_executions'] += 1
+        
+        if result.gas_used:
+            self.monitoring['total_gas_used'] += result.gas_used
+            
+        # Emit metrics for monitoring
+        logger.info(f"Execution metrics updated: {json.dumps(self.monitoring)}")
+
+    async def train_model(self):
+        """Train model using training manager"""
+        return await self.training_manager.train_step(
+            self.training_manager.get_training_batch()
+        )
+        
+    async def monitor_superchain(self) -> None:
+        """Monitor blockchain for opportunities"""
+        try:
+            while True:
+                # Fetch market data
+                market_data = await self.market_analyzer.fetch_market_data()
+                
+                # Process opportunities
+                opportunities = await self._process_opportunities(market_data)
+                
+                # Execute profitable opportunities
+                for opportunity in opportunities:
+                    if await self.validate_and_execute_opportunity(opportunity):
+                        break
+                        
+                await asyncio.sleep(1)  # Rate limiting
+                
+        except asyncio.CancelledError:
+            logger.info("Monitoring task cancelled")
+        except Exception as e:
+            logger.error(f"Error in monitoring loop: {str(e)}")
+            raise
+
+    async def validate_and_execute_opportunity(
+        self,
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType]
+    ) -> bool:
+        """Validate and execute opportunity"""
+        # Validate opportunity
+        if not self.transaction_validator.validate_opportunity(opportunity):
+                return False
+                
+        # Execute if valid
+        result = await self.execute_arbitrage(opportunity)
+        return result.success
+        
+    async def _process_opportunities(
+        self,
+        market_data: MarketDataType
+    ) -> List[OpportunityType]:
+        """Process market data for opportunities"""
+        opportunities = []
+        
+        for token_pair in self.token_pairs:
+            for amount in self.test_amounts:
+                opportunity = await self.analyze_opportunity(
+                    token_pair,
+                    amount,
+                    market_data
+                )
+                if opportunity and opportunity['predicted_profit'] > 0:
+                    opportunities.append(opportunity)
+                    
         return sorted(
             opportunities,
-            key=lambda x: (
-                x['profit_prediction'] * 
-                x['confidence'] * 
-                (1 - x['risk_score']) * 
-                x['metrics']['execution_probability']
-            ),
+            key=lambda x: x['predicted_profit'],
             reverse=True
         )
         
-    async def update_models_and_metrics(self):
-        """Update ML models and performance metrics"""
-        if len(self.training_data) % 100 == 0:  # Update every 100 new data points
-            await self.train_model()
-            self.save_model()
-            self.update_performance_metrics()
-            self.visualizer.update_metrics(self.performance_history)
-            
-    def cleanup_historical_data(self):
-        """Clean up old historical data"""
-        # Implement cleanup logic here
-        pass
+class ExecutionStatus(Enum):
+    """Execution status codes for arbitrage operations"""
+    SUCCESS = auto()
+    INVALID_OPPORTUNITY = auto()
+    MARKET_CONDITIONS_CHANGED = auto()
+    EXECUTION_ERROR = auto()
+    NETWORK_ERROR = auto()
 
-    async def record_success(self, opportunity: Dict):
-        """Enhanced success recording with training data collection"""
-        # Original success recording
-        self.performance_history.append({
-            'timestamp': datetime.now().isoformat(),
-            'success': True,
-            'profit': opportunity['profit_prediction'],
-            'token_pair': opportunity['token_pair'],
-            'amount': opportunity['amount']
-        })
-        
-        # Collect training data
-        await self.collect_training_data(
-            features=self.extract_features(opportunity),
-            label=opportunity['profit_prediction'],
-            market_condition=opportunity.get('market_data', {}),
-            execution_result={'success': True, 'actual_profit': opportunity['profit_prediction']}
-        )
-        
-        # Update visualization
-        success_rate = sum(1 for p in self.performance_history[-100:] if p['success']) / min(len(self.performance_history), 100)
-        opportunity['success_rate'] = success_rate
-        self.visualizer.update_data(opportunity)
-        
-        # Trigger training if needed
-        await self.check_and_train()
+@dataclass
+class ExecutionResult:
+    """Result of an arbitrage execution attempt"""
+    status: ExecutionStatus
+    success: bool
+    error_message: Optional[str] = None
+    gas_used: Optional[int] = None
+    execution_time: Optional[float] = None
+    tx_hash: Optional[str] = None
 
-    async def record_failure(self, opportunity: Dict, error: str):
-        """Enhanced failure recording with training data collection"""
-        # Original failure recording
-        self.performance_history.append({
-            'timestamp': datetime.now().isoformat(),
-            'success': False,
-            'error': error,
-            'token_pair': opportunity['token_pair'],
-            'amount': opportunity['amount']
-        })
-        
-        # Collect training data
-        await self.collect_training_data(
-            features=self.extract_features(opportunity),
-            label=0.0,  # Failed trades get 0 profit
-            market_condition=opportunity.get('market_data', {}),
-            execution_result={'success': False, 'error': error}
-        )
-        
-        # Update visualization
-        success_rate = sum(1 for p in self.performance_history[-100:] if p['success']) / min(len(self.performance_history), 100)
-        opportunity['success_rate'] = success_rate
-        self.visualizer.update_data(opportunity)
-        
-        # Trigger training if needed
-        await self.check_and_train()
-
-    async def collect_training_data(self, features: torch.Tensor, label: float,
-                                  market_condition: Dict, execution_result: Dict):
-        """Collect and maintain training data buffer"""
-        self.training_buffer['features'].append(features)
-        self.training_buffer['labels'].append(label)
-        self.training_buffer['timestamps'].append(datetime.now().isoformat())
-        self.training_buffer['market_conditions'].append(market_condition)
-        self.training_buffer['execution_results'].append(execution_result)
-        
-        # Maintain buffer size
-        if len(self.training_buffer['features']) > self.buffer_size:
-            for key in self.training_buffer:
-                self.training_buffer[key] = self.training_buffer[key][-self.buffer_size:]
-
-    def extract_features(self, opportunity: Dict) -> torch.Tensor:
-        """Extract features from opportunity for training"""
-        return torch.tensor([
-            opportunity['amount'],
-            opportunity.get('price_impact', 0),
-            opportunity.get('liquidity', 0),
-            opportunity.get('volatility', 0),
-            opportunity.get('gas_price', 0),
-            opportunity.get('volume_24h', 0),
-            opportunity.get('tvl', 0),
-            opportunity.get('market_sentiment', 0),
-            opportunity.get('network_congestion', 0),
-            opportunity.get('confidence', 0),
-            opportunity.get('risk_score', 0),
-            opportunity.get('slippage', 0)
-        ], dtype=torch.float32)
-
-    async def check_and_train(self):
-        """Check if we should trigger training and execute if needed"""
-        if len(self.training_buffer['features']) >= self.min_samples_for_training and \
-           len(self.training_buffer['features']) % 100 == 0:  # Train every 100 new samples
-            await self.train_model()
-            self.save_model()
-
-    async def train_model(self):
-        """Enhanced training with validation and early stopping"""
-        try:
-            # Prepare data
-            features = torch.stack(self.training_buffer['features'])
-            labels = torch.tensor(self.training_buffer['labels'])
-            
-            # Split into train/validation
-            split_idx = int(len(features) * 0.8)  # 80% train, 20% validation
-            train_features, val_features = features[:split_idx], features[split_idx:]
-            train_labels, val_labels = labels[:split_idx], labels[split_idx:]
-            
-            # Training loop
-            best_val_loss = float('inf')
-            patience = 5
-            patience_counter = 0
-            
-            for epoch in range(100):  # Max 100 epochs
-                # Train
-                self.train()
-                self.optimizer.zero_grad()
-                train_pred = self.model(train_features)[0]  # Only take predictions, not dex_weights
-                train_loss = self.criterion(train_pred, train_labels)
-                train_loss.backward()
-                self.optimizer.step()
-                
-                # Validate
-                self.eval()
-                with torch.no_grad():
-                    val_pred = self.model(val_features)[0]
-                    val_loss = self.criterion(val_pred, val_labels)
-                
-                # Early stopping check
-                if val_loss < best_val_loss - 0.001:  # Minimum improvement threshold
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                
-                if patience_counter >= patience:
-                    logger.info(f"Early stopping triggered at epoch {epoch}")
-                    break
-                
-                # Update learning rate
-                self.scheduler.step(val_loss)
-                
-                if epoch % 10 == 0:
-                    logger.info(f"Epoch {epoch}, Train Loss: {train_loss.item():.4f}, Val Loss: {val_loss.item():.4f}")
-            
-            logger.info(f"Training completed. Final validation loss: {val_loss.item():.4f}")
-            
-        except Exception as e:
-            logger.error(f"Error in training: {str(e)}")
-
-    def save_model(self, path: str = 'models/arbitrage_model.pt'):
-        """Save the neural network model to disk"""
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            torch.save({
-                'model_state_dict': self.model.state_dict(),
-                'training_data': self.training_data,
-                'performance_history': self.performance_history,
-                'token_discovery': self.token_discovery,
-                'timestamp': datetime.now().isoformat()
-            }, path)
-            logger.info(f"Model saved successfully to {path}")
-        except Exception as e:
-            logger.error(f"Error saving model: {str(e)}")
-
-    def load_model(self, path: str = 'models/arbitrage_model.pt'):
-        """Load the neural network model from disk"""
-        try:
-            if os.path.exists(path):
-                checkpoint = torch.load(path)
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-                self.training_data = checkpoint.get('training_data', [])
-                self.performance_history = checkpoint.get('performance_history', [])
-                self.token_discovery = checkpoint.get('token_discovery', self.token_discovery)
-                logger.info(f"Model loaded successfully from {path}")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            return False
-
-    def calculate_advanced_metrics(self, profit_pred: float, confidence: float, 
-                                 risk_score: float, market_data: Dict) -> Dict:
-        """Calculate advanced trading metrics"""
-        return {
-            'sharpe_ratio': self.calculate_sharpe_ratio(profit_pred, market_data),
-            'sortino_ratio': self.calculate_sortino_ratio(profit_pred, market_data),
-            'profit_factor': self.calculate_profit_factor(),
-            'win_rate': self.calculate_win_rate(),
-            'expected_value': profit_pred * confidence * (1 - risk_score),
-            'risk_adjusted_return': profit_pred / (risk_score + 1e-6),
-            'market_impact': self.estimate_market_impact(market_data),
-            'execution_probability': self.estimate_execution_probability(market_data)
-        }
-
-    async def fetch_dex_data_with_retry(self, session: aiohttp.ClientSession, dex_name: str, dex_info: Dict) -> Dict:
-        """Fetch DEX data with retry mechanism"""
-        max_retries = 3
-        retry_delay = 1
-        
-        for attempt in range(max_retries):
-            try:
-                # Get contract ABI based on DEX type
-                abi = self.get_dex_abi(dex_info['type'])
-                contract = self.web3.eth.contract(
-                    address=Web3.to_checksum_address(dex_info['address']),
-                    abi=abi
-                )
-                
-                # Verify contract deployment
-                try:
-                    code = self.web3.eth.get_code(contract.address)
-                    if code == b'':
-                        logger.error(f"Contract not deployed at {contract.address} for {dex_name}")
-                        return {
-                            'name': dex_name,
-                            'error': 'Contract not deployed',
-                            'timestamp': datetime.now().isoformat()
-                        }
-                except Exception as e:
-                    logger.error(f"Error verifying contract for {dex_name}: {str(e)}")
-                    return {
-                        'name': dex_name,
-                        'error': f'Contract verification failed: {str(e)}',
-                        'timestamp': datetime.now().isoformat()
-                    }
-                
-                # Fetch pairs/pools based on DEX type
-                if dex_info['type'] == 'UniswapV3':
-                    pools = []
-                    try:
-                        pool_count = contract.functions.allPoolsLength().call()
-                        for pool_index in range(min(pool_count, 100)):  # Limit to 100 pools
-                            try:
-                                pool = contract.functions.allPools(pool_index).call()
-                                for fee_tier in dex_info['fee_tiers']:
-                                    pools.append({
-                                        'address': pool,
-                                        'fee_tier': fee_tier
-                                    })
-                            except Exception as e:
-                                logger.error(f"Error fetching pool {pool_index} for {dex_name}: {str(e)}")
-                                continue
-                    except Exception as e:
-                        logger.error(f"Error fetching pools for {dex_name}: {str(e)}")
-                    data = {'pools': pools}
-                else:  # UniswapV2
-                    pairs = []
-                    try:
-                        pair_count = contract.functions.allPairsLength().call()
-                        for pair_index in range(min(pair_count, 100)):  # Limit to 100 pairs
-                            try:
-                                pair = contract.functions.allPairs(pair_index).call()
-                                pairs.append({
-                                    'address': pair,
-                                    'fee': dex_info['fee']
-                                })
-                            except Exception as e:
-                                logger.error(f"Error fetching pair {pair_index} for {dex_name}: {str(e)}")
-                                continue
-                    except Exception as e:
-                        logger.error(f"Error fetching pairs for {dex_name}: {str(e)}")
-                    data = {'pairs': pairs}
-                
-                return {
-                    'name': dex_name,
-                    'type': dex_info['type'],
-                    'data': data,
-                    'timestamp': datetime.now().isoformat()
-                }
-                    
-            except Exception as e:
-                logger.error(f"Error fetching {dex_name} data (attempt {attempt + 1}/{max_retries}): {str(e)}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                else:
-                    return {
-                        'name': dex_name,
-                        'error': str(e),
-                        'timestamp': datetime.now().isoformat()
-                    }
-        
-        return None
-
-    def get_dex_abi(self, dex_type: str) -> List:
-        """Get ABI based on DEX type"""
-        if dex_type == 'UniswapV3':
-            return [
-                {
-                    "inputs": [],
-                    "name": "allPoolsLength",
-                    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-                    "stateMutability": "view",
-                    "type": "function"
-                },
-                {
-                    "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-                    "name": "allPools",
-                    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-                    "stateMutability": "view",
-                    "type": "function"
-                }
-            ]
-        else:  # UniswapV2
-            return [
-                {
-                    "constant": True,
-                    "inputs": [],
-                    "name": "allPairsLength",
-                    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-                    "payable": False,
-                    "stateMutability": "view",
-                    "type": "function"
-                },
-                {
-                    "constant": True,
-                    "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
-                    "name": "allPairs",
-                    "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-                    "payable": False,
-                    "stateMutability": "view",
-                    "type": "function"
-                }
-            ]
-
-    def get_viable_pairs(self) -> List[Tuple[str, str]]:
-        """Get list of viable trading pairs based on liquidity and volume"""
-        viable_pairs = []
-        
-        try:
-            # Get common tokens across supported DEXes
-            common_tokens = set()
-            for dex_name, dex_info in self.supported_dexes.items():
-                if dex_name in self.dex_analytics:
-                    dex_tokens = set(self.dex_analytics[dex_name].get('tokens', []))
-                    if not common_tokens:
-                        common_tokens = dex_tokens
-                    else:
-                        common_tokens &= dex_tokens
-            
-            # Filter pairs based on criteria
-            for token1 in common_tokens:
-                for token2 in common_tokens:
-                    if token1 != token2:
-                        pair = (token1, token2)
-                        if self._is_viable_pair(pair):
-                            viable_pairs.append(pair)
-            
-            return viable_pairs
-            
-        except Exception as e:
-            logger.error(f"Error getting viable pairs: {str(e)}")
-            return []
-
-    def _is_viable_pair(self, pair: Tuple[str, str]) -> bool:
-        """Check if a trading pair meets viability criteria"""
-        try:
-            token1, token2 = pair
-            
-            # Check minimum liquidity
-            if not self._check_liquidity(token1, token2):
-                return False
-                
-            # Check trading volume
-            if not self._check_volume(token1, token2):
-                return False
-                
-            # Check if pair is blacklisted
-            if pair in self.token_discovery['blacklisted_tokens']:
-                return False
-                
-            # Check token age
-            if not self._check_token_age(token1) or not self._check_token_age(token2):
-                return False
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error checking pair viability: {str(e)}")
-            return False
-
-    def _check_liquidity(self, token1: str, token2: str) -> bool:
-        """Check if pair has sufficient liquidity across DEXes"""
-        try:
-            total_liquidity = 0
-            for dex_name, dex_info in self.supported_dexes.items():
-                if dex_name in self.dex_analytics:
-                    pair_key = f"{token1}/{token2}"
-                    liquidity = self.dex_analytics[dex_name].get('liquidity', {}).get(pair_key, 0)
-                    total_liquidity += liquidity
-            
-            return total_liquidity >= self.token_discovery['min_liquidity']
-            
-        except Exception as e:
-            logger.error(f"Error checking liquidity: {str(e)}")
-            return False
-
-    def _check_volume(self, token1: str, token2: str) -> bool:
-        """Check if pair has sufficient trading volume"""
-        try:
-            total_volume = 0
-            for dex_name in self.supported_dexes:
-                if dex_name in self.dex_analytics:
-                    pair_key = f"{token1}/{token2}"
-                    volume = self.dex_analytics[dex_name].get('volume', {}).get(pair_key, 0)
-                    total_volume += volume
-            
-            return total_volume > 0  # You can set a minimum volume threshold here
-            
-        except Exception as e:
-            logger.error(f"Error checking volume: {str(e)}")
-            return False
-
-    def _check_token_age(self, token: str) -> bool:
-        """Check if token meets minimum age requirement"""
-        try:
-            if token in self.token_discovery['discovered_tokens']:
-                discovery_time = datetime.fromisoformat(
-                    self.token_discovery['discovered_tokens'][token]['discovery_time']
-                )
-                age_days = (datetime.now() - discovery_time).days
-                return age_days >= self.token_discovery['min_age_days']
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error checking token age: {str(e)}")
-            return False
-
-async def main():
-    # Initialize agent
-    agent = SuperchainArbitrageAgent(web3_provider="YOUR_RPC_ENDPOINT")
-    
-    try:
-        # Load existing model if available
-        try:
-            agent.load_model()
-            logger.info("Loaded existing model")
-        except:
-            logger.info("Starting with fresh model")
-        
-        # Start visualization dashboard
-        agent.visualizer.run_in_thread()
-        
-        # Initialize Telegram bot
-        if not await telegram_bot.initialize():
-            logger.error("Failed to initialize Telegram bot")
-            agent.visualizer.stop()
-            return
-            
-        # Start monitoring in the background
-        monitoring_task = asyncio.create_task(agent.monitor_superchain())
-        
-        try:
-            # Keep the main loop running
-            while True:
-                await asyncio.sleep(1)
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-        finally:
-            # Cleanup
-            monitoring_task.cancel()
-            try:
-                await monitoring_task
-            except asyncio.CancelledError:
-                pass
-            
-            # Cleanup components
-            await agent.close()
-            if telegram_bot.application:
-                await telegram_bot.application.stop()
-                await telegram_bot.application.shutdown()
-            await telegram_bot.stop()
-            agent.visualizer.stop()
-            
-    except Exception as e:
-        logger.error(f"Fatal error: {str(e)}", exc_info=True)
-        
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Application terminated by user")
-    except Exception as e:
-        logger.error(f"Application error: {str(e)}", exc_info=True) 
+@dataclass
+class MarketValidationResult:
+    """Result of market condition validation"""
+    is_valid: bool
+    reason: Optional[str] = None
+    current_price: Optional[float] = None
+    price_change: Optional[float] = None
+    current_liquidity: Optional[float] = None
+    current_gas: Optional[int] = None
+    network_status: Optional[Dict[str, Any]] = None

@@ -1,471 +1,568 @@
-import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output
-import plotly.graph_objs as go
-from collections import deque
-import threading
-import pandas as pd
-from datetime import datetime, timedelta
-import numpy as np
-from typing import Dict, List
-import logging
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
-import time
-import requests
+"""
+Enhanced Visualization Dashboard Module
 
-logger = logging.getLogger(__name__)
+This module provides a real-time, interactive dashboard for monitoring arbitrage operations.
+Features include auto-refreshing metrics, interactive charts, and responsive design.
+"""
+
+from dash import Dash, dcc, html, Input, Output, State, callback_context
+import dash_bootstrap_components as dbc
+from dash.exceptions import PreventUpdate
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime, timedelta
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional, Union, Any, TypedDict
+import logging
+from dataclasses import dataclass
+from functools import lru_cache
+import time
+from prometheus_client import Counter, Histogram
+import structlog
+import asyncio
+from visualization.chart_utils import InteractiveChartGenerator, ChartTheme
+from visualization.analytics import DataAnalyzer, AnalyticsConfig
+from visualization.performance import PerformanceMonitor, PerformanceConfig
+
+logger = structlog.get_logger(__name__)
+
+# Metrics for performance monitoring
+METRICS = {
+    'render_time': Histogram(
+        'visualization_render_seconds',
+        'Time spent rendering visualizations',
+        buckets=[0.1, 0.5, 1.0, 2.0, 5.0]
+    ),
+    'update_count': Counter(
+        'visualization_updates_total',
+        'Total number of visualization updates'
+    ),
+    'error_count': Counter(
+        'visualization_errors_total',
+        'Total number of visualization errors',
+        ['type']
+    )
+}
+
+class Alert(TypedDict):
+    message: str
+    color: str
+    timestamp: datetime
+
+class Profit(TypedDict):
+    timestamp: datetime
+    profit: float
+    cumulative_profit: float
+
+class GasPrice(TypedDict):
+    timestamp: datetime
+    base_fee: int
+    priority_fee: int
+
+class Opportunity(TypedDict):
+    timestamp: datetime
+    expected_profit: float
+    confidence: float
+    executed: bool
+
+class NetworkStatus(TypedDict):
+    timestamp: datetime
+    healthy: bool
+    latency: float
+
+class DataStore(TypedDict):
+    profits: List[Profit]
+    gas_prices: List[GasPrice]
+    opportunities: List[Opportunity]
+    network_status: List[NetworkStatus]
+
+@dataclass
+class ChartConfig:
+    """Configuration for chart appearance and behavior"""
+    theme: str = 'light'
+    height: int = 400
+    margin: Dict[str, int] = {'l': 40, 'r': 40, 't': 40, 'b': 40}
+    animation_duration: int = 1000
+    
+    def __post_init__(self):
+        pass  # No need for post init since we have default value
 
 class ArbitrageVisualizer:
-    """Real-time visualization dashboard for arbitrage monitoring"""
+    """
+    Enhanced visualization dashboard for arbitrage monitoring.
     
-    def __init__(self, max_points: int = 1000):
-        self.max_points = max_points
-        self.app = dash.Dash(__name__)
+    Features:
+    - Real-time metric updates
+    - Interactive charts with Plotly
+    - Responsive design with Bootstrap
+    - Dark/Light theme switching
+    - Performance monitoring and caching
+    - Live alerts and notifications
+    """
+    
+    def __init__(
+        self,
+        port: int = 8050,
+        debug: bool = False,
+        config: Optional[Dict] = None
+    ):
+        """Initialize the visualization dashboard"""
+        self.port = port
+        self.debug = debug
+        self.config = config or {}
         
-        # Real-time data storage
-        self.data = {
-            'timestamps': deque(maxlen=max_points),
-            'profits': deque(maxlen=max_points),
-            'confidence_scores': deque(maxlen=max_points),
-            'risk_scores': deque(maxlen=max_points),
-            'gas_prices': deque(maxlen=max_points),
-            'volumes': deque(maxlen=max_points),
-            'slippage': deque(maxlen=max_points),
-            'price_impact': deque(maxlen=max_points),
-            'execution_times': deque(maxlen=max_points)
+        # Initialize Dash app with Bootstrap
+        self.app = Dash(
+            __name__,
+            external_stylesheets=[dbc.themes.BOOTSTRAP],
+            suppress_callback_exceptions=True
+        )
+        
+        # Chart configuration
+        self.chart_config = ChartConfig(
+            theme=self.config.get('theme', 'light'),
+            height=self.config.get('chart_height', 400),
+            animation_duration=self.config.get('animation_duration', 1000)
+        )
+        
+        # Initialize components
+        self.chart_generator = InteractiveChartGenerator(
+            theme=ChartTheme.get_light() if self.chart_config.theme == 'light' else ChartTheme.get_dark()
+        )
+        self.data_analyzer = DataAnalyzer(AnalyticsConfig())
+        self.performance_monitor = PerformanceMonitor(PerformanceConfig())
+        
+        # Initialize data storage
+        self.data: DataStore = {
+            'profits': [],
+            'gas_prices': [],
+            'opportunities': [],
+            'network_status': []
         }
         
-        # Performance tracking
-        self.performance = {
-            'total_trades': 0,
-            'successful_trades': 0,
-            'failed_trades': 0,
-            'total_profit': 0.0,
-            'total_gas_spent': 0.0,
-            'best_trade': None,
-            'worst_trade': None
-        }
+        # Alert storage
+        self.active_alerts: List[Alert] = []
         
-        # Token pair analytics
-        self.token_analytics = {}
-        
-        # DEX analytics
-        self.dex_analytics = {}
-        
-        # Visualization settings
-        plt.style.use('dark_background')
-        sns.set_theme(style="darkgrid")
-        
+        # Setup layout and callbacks
         self._setup_layout()
         self._setup_callbacks()
         
     def _setup_layout(self):
-        """Setup the dashboard layout"""
-        self.app.layout = html.Div([
-            html.H1('Base Chain Arbitrage Monitor', 
-                   style={'textAlign': 'center', 'color': '#ffffff'}),
+        """Setup the dashboard layout with Bootstrap components"""
+        self.app.layout = dbc.Container([
+            # Header
+            dbc.Row([
+                dbc.Col([
+                    html.H1("Arbitrage Dashboard", className="text-primary mb-4"),
+                    dbc.Switch(
+                        id='theme-switch',
+                        label="Dark Mode",
+                        value=self.chart_config.theme == 'dark'
+                    )
+                ])
+            ], className="mt-4"),
             
-            # System Status
-            html.Div([
-                html.Div([
-                    html.H3('System Status'),
-                    html.H4(id='system-status', children='🟢 Active')
-                ], className='status-box'),
-                html.Div([
-                    html.H3('24h Performance'),
-                    html.Div(id='performance-summary')
-                ], className='status-box'),
-                html.Div([
-                    html.H3('Current Network'),
-                    html.H4('Base Chain'),
-                    html.P(id='network-stats')
-                ], className='status-box')
-            ], className='status-row'),
-            
-            # Main Trading View
-            html.Div([
-                # Left panel - Real-time metrics
-                html.Div([
-                    dcc.Graph(id='profit-chart', className='chart'),
-                    dcc.Graph(id='volume-chart', className='chart')
-                ], className='panel'),
-                
-                # Right panel - Risk metrics
-                html.Div([
-                    dcc.Graph(id='risk-analysis', className='chart'),
-                    dcc.Graph(id='gas-analysis', className='chart')
-                ], className='panel')
-            ], className='main-view'),
-            
-            # Bottom panel - Token & DEX Analytics
-            html.Div([
-                html.Div([
-                    html.H3('Token Pair Performance'),
-                    dcc.Graph(id='token-performance')
-                ], className='bottom-panel'),
-                html.Div([
-                    html.H3('DEX Analytics'),
-                    dcc.Graph(id='dex-analytics')
-                ], className='bottom-panel')
-            ], className='analytics-view'),
-            
-            # Active Opportunities
-            html.Div([
-                html.H3('Active Arbitrage Opportunities'),
-                html.Div(id='opportunities-table')
-            ], className='opportunities-view'),
-            
+            # Auto-refresh intervals
             dcc.Interval(
-                id='update-interval',
-                interval=5000,  # Update every 5 seconds instead of 1 second
+                id='fast-interval',
+                interval=1*1000,  # 1 second for critical updates
                 n_intervals=0
-            )
-        ])
+            ),
+            dcc.Interval(
+                id='medium-interval',
+                interval=5*1000,  # 5 seconds for charts
+                n_intervals=0
+            ),
+            dcc.Interval(
+                id='slow-interval',
+                interval=30*1000,  # 30 seconds for analytics
+                n_intervals=0
+            ),
+            
+            # Alert area
+            dbc.Row([
+                dbc.Col([
+                    html.Div(id='alert-container')
+                ])
+            ], className="mt-2"),
+            
+            # Main content
+            dbc.Row([
+                # Left column - Key Metrics
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Key Metrics"),
+                        dbc.CardBody([
+                            html.Div(id='key-metrics-container')
+                        ])
+                    ])
+                ], width=4),
+                
+                # Right column - Charts
+                dbc.Col([
+                    dbc.Tabs([
+                        dbc.Tab([
+                            dcc.Loading(
+                                dcc.Graph(id='profit-chart'),
+                                type="circle"
+                            )
+                        ], label="Profit Analysis"),
+                        dbc.Tab([
+                            dcc.Loading(
+                                dcc.Graph(id='gas-chart'),
+                                type="circle"
+                            )
+                        ], label="Gas Analysis")
+                    ])
+                ], width=8)
+            ], className="mt-4"),
+            
+            # Bottom row - Detailed Stats
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("Opportunity Analysis"),
+                        dbc.CardBody([
+                            dcc.Loading(
+                                dcc.Graph(id='opportunity-chart'),
+                                type="circle"
+                            )
+                        ])
+                    ])
+                ])
+            ], className="mt-4"),
+            
+            # Performance Metrics
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardHeader("System Performance"),
+                        dbc.CardBody([
+                            html.Div(id='performance-metrics-container')
+                        ])
+                    ])
+                ])
+            ], className="mt-4")
+            
+        ], fluid=True)
         
     def _setup_callbacks(self):
-        """Setup dashboard callbacks"""
+        """Setup all dashboard callbacks"""
+        
+        @self.app.callback(
+            Output('key-metrics-container', 'children'),
+            Input('fast-interval', 'n_intervals')
+        )
+        def update_key_metrics(n):
+            """Update key metrics display"""
+            try:
+                with METRICS['render_time'].time():
+                    metrics = self._get_current_metrics()
+                    
+                    return dbc.Row([
+                        dbc.Col([
+                            html.H4(f"${metrics['total_profit']:.2f}"),
+                            html.P("Total Profit")
+                        ]),
+                        dbc.Col([
+                            html.H4(f"{metrics['success_rate']:.1%}"),
+                            html.P("Success Rate")
+                        ]),
+                        dbc.Col([
+                            html.H4(f"{metrics['gas_price']} gwei"),
+                            html.P("Current Gas")
+                        ])
+                    ])
+            except Exception as e:
+                logger.error("Error updating metrics", error=str(e))
+                METRICS['error_count'].labels(type='metrics_update').inc()
+                self._add_alert("Error updating metrics", "danger")
+                raise PreventUpdate
+        
         @self.app.callback(
             [Output('profit-chart', 'figure'),
-             Output('volume-chart', 'figure'),
-             Output('risk-analysis', 'figure'),
-             Output('gas-analysis', 'figure'),
-             Output('token-performance', 'figure'),
-             Output('dex-analytics', 'figure'),
-             Output('performance-summary', 'children'),
-             Output('network-stats', 'children'),
-             Output('opportunities-table', 'children')],
-            [Input('update-interval', 'n_intervals')]
+             Output('gas-chart', 'figure'),
+             Output('opportunity-chart', 'figure')],
+            Input('medium-interval', 'n_intervals'),
+            State('theme-switch', 'value')
         )
-        def update_dashboard(_):
-            return self._generate_dashboard_data()
-            
-    def _generate_dashboard_data(self):
-        """Generate real-time dashboard data"""
-        # Profit chart
-        profit_fig = go.Figure()
-        profit_fig.add_trace(go.Scatter(
-            x=list(self.data['timestamps']),
-            y=list(self.data['profits']),
-            name='Profit (ETH)',
-            line=dict(color='#00ff00')
-        ))
-        profit_fig.update_layout(
-            title='Real-time Profit Analysis',
-            template='plotly_dark',
-            height=300
+        def update_charts(n, dark_mode):
+            """Update all charts"""
+            try:
+                with METRICS['render_time'].time():
+                    # Update chart theme based on dark mode
+                    self.chart_generator = InteractiveChartGenerator(
+                        theme=ChartTheme.get_dark() if dark_mode else ChartTheme.get_light()
+                    )
+                    
+                    # Generate charts
+                    profit_fig, gas_fig, opportunity_fig = self.update_charts(dark_mode)
+                    
+                    return profit_fig, gas_fig, opportunity_fig
+                    
+            except Exception as e:
+                logger.error("Error updating charts", error=str(e))
+                METRICS['error_count'].labels(type='chart_update').inc()
+                self._add_alert("Error updating charts", "danger")
+                raise PreventUpdate
+        
+        @self.app.callback(
+            Output('performance-metrics-container', 'children'),
+            Input('slow-interval', 'n_intervals')
         )
+        async def update_performance_metrics(n):
+            """Update performance metrics display"""
+            try:
+                metrics = await self.performance_monitor.run_health_check()
+                suggestions = self.performance_monitor._generate_optimization_suggestions(metrics)
+                
+                return [
+                    dbc.Row([
+                        dbc.Col([
+                            html.H6("CPU Usage"),
+                            html.P(f"{metrics['cpu_usage']*100:.1f}%")
+                        ]),
+                        dbc.Col([
+                            html.H6("Memory Usage"),
+                            html.P(f"{metrics['memory_percent']:.1f}%")
+                        ]),
+                        dbc.Col([
+                            html.H6("Render Time"),
+                            html.P(f"{metrics.get('render_time_avg', 0):.3f}s")
+                        ])
+                    ]),
+                    html.Hr(),
+                    html.H6("Optimization Suggestions"),
+                    html.Ul([html.Li(s) for s in suggestions])
+                ]
+                
+            except Exception as e:
+                logger.error("Error updating performance metrics", error=str(e))
+                METRICS['error_count'].labels(type='performance_update').inc()
+                self._add_alert("Error updating performance metrics", "warning")
+                raise PreventUpdate
         
-        # Volume chart
-        volume_fig = go.Figure()
-        volume_fig.add_trace(go.Bar(
-            x=list(self.data['timestamps']),
-            y=list(self.data['volumes']),
-            name='Trading Volume',
-            marker_color='#4287f5'
-        ))
-        volume_fig.update_layout(
-            title='Trading Volume',
-            template='plotly_dark',
-            height=300
+        @self.app.callback(
+            Output('alert-container', 'children'),
+            Input('fast-interval', 'n_intervals')
         )
-        
-        # Risk analysis
-        risk_fig = go.Figure()
-        risk_fig.add_trace(go.Scatter(
-            x=list(self.data['timestamps']),
-            y=list(self.data['risk_scores']),
-            name='Risk Score',
-            line=dict(color='#ff0000')
-        ))
-        risk_fig.add_trace(go.Scatter(
-            x=list(self.data['timestamps']),
-            y=list(self.data['confidence_scores']),
-            name='Confidence',
-            line=dict(color='#00ff00')
-        ))
-        risk_fig.update_layout(
-            title='Risk Analysis',
-            template='plotly_dark',
-            height=300
-        )
-        
-        # Gas analysis
-        gas_fig = go.Figure()
-        gas_fig.add_trace(go.Scatter(
-            x=list(self.data['timestamps']),
-            y=list(self.data['gas_prices']),
-            name='Gas Price (GWEI)',
-            line=dict(color='#ffa500')
-        ))
-        gas_fig.update_layout(
-            title='Gas Price Analysis',
-            template='plotly_dark',
-            height=300
-        )
-        
-        # Token performance
-        token_fig = go.Figure()
-        if self.token_analytics:
-            token_fig.add_trace(go.Bar(
-                x=list(self.token_analytics.keys()),
-                y=[data['profit'] for data in self.token_analytics.values()],
-                name='Token Profit',
-                marker_color='#00ff00'
-            ))
-        token_fig.update_layout(
-            title='Token Pair Performance',
-            template='plotly_dark',
-            height=300
-        )
-        
-        # DEX analytics
-        dex_fig = go.Figure()
-        if self.dex_analytics:
-            dex_fig.add_trace(go.Bar(
-                x=list(self.dex_analytics.keys()),
-                y=[data['volume'] for data in self.dex_analytics.values()],
-                name='DEX Volume',
-                marker_color='#4287f5'
-            ))
-        dex_fig.update_layout(
-            title='DEX Analytics',
-            template='plotly_dark',
-            height=300
-        )
-        
-        # Performance summary
-        performance_summary = html.Div([
-            html.P(f"Total Trades: {self.performance['total_trades']}"),
-            html.P(f"Success Rate: {self._calculate_success_rate():.1f}%"),
-            html.P(f"Total Profit: {self.performance['total_profit']:.4f} ETH"),
-            html.P(f"Gas Spent: {self.performance['total_gas_spent']:.4f} ETH")
-        ])
-        
-        # Network stats
-        network_stats = html.Div([
-            html.P(f"Current Gas: {self.data['gas_prices'][-1] if self.data['gas_prices'] else 0} GWEI"),
-            html.P(f"24h Volume: ${sum(self.data['volumes']):.2f}")
-        ])
-        
-        # Active opportunities table
-        opportunities_table = self._generate_opportunities_table()
-        
-        return (profit_fig, volume_fig, risk_fig, gas_fig, token_fig, dex_fig,
-                performance_summary, network_stats, opportunities_table)
+        def update_alerts(n):
+            """Update alert display"""
+            return [
+                dbc.Alert(
+                    alert['message'],
+                    color=alert['color'],
+                    dismissable=True,
+                    is_open=True,
+                    duration=5000
+                )
+                for alert in self.active_alerts[-5:]  # Show last 5 alerts
+            ]
+    
+    def _add_alert(self, message: str, color: str) -> None:
+        """Add a new alert to the active alerts list"""
+        self.active_alerts.append({
+            'message': message,
+            'color': color,
+            'timestamp': datetime.now()
+        })
+        # Keep only last 10 alerts
+        self.active_alerts = self.active_alerts[-10:]
+    
+    @lru_cache(maxsize=100)
+    def _get_current_metrics(self) -> Dict[str, float]:
+        """Get current system metrics with caching"""
+        try:
+            return {
+                'total_profit': sum(p['profit'] for p in self.data['profits']),
+                'success_rate': self._calculate_success_rate(),
+                'gas_price': self._get_current_gas_price()
+            }
+        except Exception as e:
+            logger.error("Error getting metrics", error=str(e))
+            return {'total_profit': 0.0, 'success_rate': 0.0, 'gas_price': 0}
     
     def _calculate_success_rate(self) -> float:
-        """Calculate current success rate"""
-        if self.performance['total_trades'] == 0:
-            return 0.0
-        return (self.performance['successful_trades'] / self.performance['total_trades']) * 100
-    
-    def _generate_opportunities_table(self):
-        """Generate active opportunities table"""
-        # Get current opportunities
-        current_opps = []
-        for i, (profit, conf, risk) in enumerate(zip(
-            self.data['profits'], 
-            self.data['confidence_scores'], 
-            self.data['risk_scores']
-        )):
-            if profit > 0 and conf > 0.8 and risk < 0.3:
-                current_opps.append({
-                    'id': f'opp_{i}',
-                    'profit': profit,
-                    'confidence': conf,
-                    'risk': risk
-                })
-        
-        # Create table
-        return html.Table(
-            [html.Tr([html.Th(col) for col in ['ID', 'Profit', 'Confidence', 'Risk']])] +
-            [html.Tr([
-                html.Td(opp['id']),
-                html.Td(f"{opp['profit']:.4f} ETH"),
-                html.Td(f"{opp['confidence']*100:.1f}%"),
-                html.Td(f"{opp['risk']*100:.1f}%")
-            ]) for opp in current_opps],
-            className='opportunities-table'
-        )
-    
-    def update_data(self, data: Dict):
-        """Update real-time data"""
-        timestamp = datetime.now()
-        
-        # Update time series data
-        self.data['timestamps'].append(timestamp)
-        self.data['profits'].append(data['profit_prediction'])
-        self.data['confidence_scores'].append(data['confidence'])
-        self.data['risk_scores'].append(data['risk_score'])
-        self.data['gas_prices'].append(data['gas_price'])
-        self.data['volumes'].append(data['volume_24h'])
-        self.data['slippage'].append(data.get('slippage', 0))
-        self.data['price_impact'].append(data.get('price_impact', 0))
-        
-        # Update token analytics
-        token_pair = f"{data['tokens_involved'][0]}/{data['tokens_involved'][1]}"
-        if token_pair not in self.token_analytics:
-            self.token_analytics[token_pair] = {
-                'trades': 0,
-                'profit': 0,
-                'volume': 0
-            }
-        self.token_analytics[token_pair]['trades'] += 1
-        self.token_analytics[token_pair]['profit'] += data['profit_prediction']
-        self.token_analytics[token_pair]['volume'] += data['volume_24h']
-        
-        # Update DEX analytics if available
-        if 'dex' in data:
-            dex_name = data['dex']
-            if dex_name not in self.dex_analytics:
-                self.dex_analytics[dex_name] = {
-                    'trades': 0,
-                    'volume': 0,
-                    'profit': 0
-                }
-            self.dex_analytics[dex_name]['trades'] += 1
-            self.dex_analytics[dex_name]['volume'] += data['volume_24h']
-            self.dex_analytics[dex_name]['profit'] += data['profit_prediction']
-    
-    def update_trade_execution(self, trade: Dict):
-        """Update trade execution data"""
-        self.performance['total_trades'] += 1
-        
-        profit = trade.get('profit', 0)
-        gas_used = trade.get('gas_used', 0)
-        net_profit = profit - gas_used
-        
-        if trade.get('status') == 'completed':
-            self.performance['successful_trades'] += 1
-            self.performance['total_profit'] += profit
-            self.performance['total_gas_spent'] += gas_used
-            
-            # Update best trade
-            if not self.performance['best_trade'] or net_profit > self.performance['best_trade']['profit']:
-                self.performance['best_trade'] = {
-                    'profit': net_profit,
-                    'tokens': trade['tokens_involved'],
-                    'timestamp': datetime.now()
-                }
-        else:
-            self.performance['failed_trades'] += 1
-            
-            # Update worst trade
-            if not self.performance['worst_trade'] or net_profit < self.performance['worst_trade']['profit']:
-                self.performance['worst_trade'] = {
-                    'profit': net_profit,
-                    'tokens': trade['tokens_involved'],
-                    'timestamp': datetime.now()
-                }
-        
-        # Add execution time to analytics
-        if 'execution_time' in trade:
-            self.data['execution_times'].append(trade['execution_time'])
-    
-    def run_in_thread(self):
-        """Run the dashboard in a separate thread"""
-        def run():
-            self.app.run_server(debug=False, host='0.0.0.0', port=8050, use_reloader=False)
-            
-        self.thread = threading.Thread(target=run, daemon=True)
-        self.thread.start()
-        logger.info("Arbitrage visualization dashboard started on http://localhost:8050")
-        
-        # Wait a moment to ensure the server starts
-        time.sleep(2)
-        
-        # Verify the server is running
+        """Calculate the success rate of arbitrage opportunities"""
         try:
-            response = requests.get('http://localhost:8050')
-            if response.status_code == 200:
-                logger.info("Dashboard server is running successfully")
-            else:
-                logger.warning(f"Dashboard server returned status code: {response.status_code}")
+            opportunities = self.data['opportunities']
+            if not opportunities:
+                return 0.0
+            
+            successful = sum(1 for op in opportunities if op['executed'])
+            return successful / len(opportunities)
         except Exception as e:
-            logger.error(f"Error verifying dashboard server: {str(e)}")
+            logger.error("Error calculating success rate", error=str(e))
+            return 0.0
     
-    def stop(self):
-        """Stop the visualization dashboard"""
-        if hasattr(self, 'thread'):
-            self.thread.join(timeout=1)
-        logger.info("Arbitrage visualization dashboard stopped")
+    def _get_current_gas_price(self) -> int:
+        """Get the current gas price"""
+        try:
+            gas_prices = self.data['gas_prices']
+            if not gas_prices:
+                return 0
+            return gas_prices[-1]['base_fee'] + gas_prices[-1]['priority_fee']
+        except Exception as e:
+            logger.error("Error getting gas price", error=str(e))
+            return 0
+    
+    def update_data(self, new_data: Dict[str, Any]) -> None:
+        """Update dashboard data with new metrics"""
+        try:
+            timestamp = datetime.now()
+            
+            # Update profits
+            if 'profit' in new_data:
+                self.data['profits'].append({
+                    'timestamp': timestamp,
+                    'profit': new_data['profit'],
+                    'cumulative_profit': sum(p['profit'] for p in self.data['profits']) + new_data['profit']
+                })
+            
+            # Update gas prices
+            if 'gas_price' in new_data:
+                self.data['gas_prices'].append({
+                    'timestamp': timestamp,
+                    'base_fee': new_data['gas_price']['base_fee'],
+                    'priority_fee': new_data['gas_price']['priority_fee']
+                })
+            
+            # Update opportunities
+            if 'opportunity' in new_data:
+                self.data['opportunities'].append({
+                    'timestamp': timestamp,
+                    'expected_profit': new_data['opportunity']['expected_profit'],
+                    'confidence': new_data['opportunity']['confidence'],
+                    'executed': new_data['opportunity'].get('executed', False)
+                })
+            
+            # Update network status
+            if 'network_status' in new_data:
+                self.data['network_status'].append({
+                    'timestamp': timestamp,
+                    'healthy': new_data['network_status']['healthy'],
+                    'latency': new_data['network_status']['latency']
+                })
+            
+            # Trim old data
+            self._trim_old_data()
+            
+            METRICS['update_count'].inc()
+            
+        except Exception as e:
+            logger.error("Error updating data", error=str(e))
+            METRICS['error_count'].labels(type='data_update').inc()
+            self._add_alert("Error updating dashboard data", "danger")
+    
+    def _trim_old_data(self, max_age: timedelta = timedelta(hours=24)):
+        """Trim data older than max_age"""
+        try:
+            cutoff = datetime.now() - max_age
+            
+            # Trim each data type separately
+            self.data['profits'] = [
+                item for item in self.data['profits']
+                if item['timestamp'] > cutoff
+            ]
+            self.data['gas_prices'] = [
+                item for item in self.data['gas_prices']
+                if item['timestamp'] > cutoff
+            ]
+            self.data['opportunities'] = [
+                item for item in self.data['opportunities']
+                if item['timestamp'] > cutoff
+            ]
+            self.data['network_status'] = [
+                item for item in self.data['network_status']
+                if item['timestamp'] > cutoff
+            ]
+        except Exception as e:
+            logger.error("Error trimming old data", error=str(e))
+        
+    def _prepare_chart_data(self) -> Dict[str, pd.DataFrame]:
+        """Prepare data for charts in a consistent format"""
+        try:
+            chart_data = {
+                'profits': pd.DataFrame(self.data['profits']),
+                'gas': pd.DataFrame(self.data['gas_prices']),
+                'opportunities': pd.DataFrame(self.data['opportunities']),
+                'network': pd.DataFrame(self.data['network_status'])
+            }
+            return chart_data
+        except Exception as e:
+            logger.error("Error preparing chart data", error=str(e))
+            return {}
 
-# Create assets directory and add custom CSS
-os.makedirs('assets', exist_ok=True)
+    def create_opportunity_chart(self) -> go.Figure:
+        """Create opportunity analysis chart"""
+        try:
+            chart_data = self._prepare_chart_data()
+            if 'opportunities' not in chart_data:
+                return go.Figure()
+            
+            df = chart_data['opportunities']
+            return self.chart_generator.create_opportunity_chart(
+                opportunities=df['expected_profit'].astype(float).tolist(),
+                timestamps=df['timestamp'].tolist(),
+                height=self.chart_config.height,
+                margin=self.chart_config.margin
+            )
+        except Exception as e:
+            logger.error("Error creating opportunity chart", error=str(e))
+            return go.Figure()
 
-with open('assets/custom.css', 'w') as f:
-    f.write("""
-body {
-    background-color: #1a1a1a;
-    color: #ffffff;
-    font-family: Arial, sans-serif;
-}
-
-.status-row {
-    display: flex;
-    justify-content: space-between;
-    margin: 20px;
-}
-
-.status-box {
-    background-color: #2a2a2a;
-    border-radius: 10px;
-    padding: 15px;
-    width: 30%;
-    text-align: center;
-}
-
-.main-view {
-    display: flex;
-    justify-content: space-between;
-    margin: 20px;
-}
-
-.panel {
-    width: 48%;
-    background-color: #2a2a2a;
-    border-radius: 10px;
-    padding: 15px;
-}
-
-.chart {
-    margin-bottom: 20px;
-}
-
-.analytics-view {
-    display: flex;
-    justify-content: space-between;
-    margin: 20px;
-}
-
-.bottom-panel {
-    width: 48%;
-    background-color: #2a2a2a;
-    border-radius: 10px;
-    padding: 15px;
-}
-
-.opportunities-view {
-    margin: 20px;
-    background-color: #2a2a2a;
-    border-radius: 10px;
-    padding: 15px;
-}
-
-.opportunities-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.opportunities-table th, .opportunities-table td {
-    padding: 10px;
-    text-align: left;
-    border-bottom: 1px solid #3a3a3a;
-}
-
-.opportunities-table th {
-    background-color: #3a3a3a;
-}
-""") 
+    def update_charts(self, dark_mode: bool) -> tuple[go.Figure, go.Figure, go.Figure]:
+        """Update all charts with consistent data"""
+        try:
+            with METRICS['render_time'].time():
+                # Update chart theme based on dark mode
+                self.chart_generator = InteractiveChartGenerator(
+                    theme=ChartTheme.get_dark() if dark_mode else ChartTheme.get_light()
+                )
+                
+                # Prepare data once for all charts
+                chart_data = self._prepare_chart_data()
+                if not chart_data:
+                    raise ValueError("No chart data available")
+                
+                # Generate charts using the prepared data
+                profit_fig = self.chart_generator.create_profit_chart(
+                    data=chart_data['profits'].to_dict('records'),
+                    height=self.chart_config.height,
+                    margin=self.chart_config.margin
+                )
+                
+                gas_fig = self.chart_generator.create_gas_analysis_chart(
+                    data=chart_data['gas'].to_dict('records'),
+                    height=self.chart_config.height,
+                    margin=self.chart_config.margin
+                )
+                
+                opportunity_fig = self.create_opportunity_chart()
+                
+                return profit_fig, gas_fig, opportunity_fig
+                
+        except Exception as e:
+            logger.error("Error updating charts", error=str(e))
+            METRICS['error_count'].labels(type='chart_update').inc()
+            self._add_alert("Error updating charts", "danger")
+            raise PreventUpdate
+    
+    def run(self):
+        """Run the dashboard server"""
+        try:
+            # Start performance monitoring
+            asyncio.run(self.performance_monitor.start_monitoring())
+            
+            # Run the Dash server
+            self.app.run_server(
+                port=self.port,
+                debug=self.debug
+            )
+        except Exception as e:
+            logger.error("Error running dashboard", error=str(e))
+            raise
+        finally:
+            # Stop performance monitoring
+            asyncio.run(self.performance_monitor.stop_monitoring())

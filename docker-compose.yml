@@ -1,0 +1,27 @@
+services:
+  flash-loan-bot:
+    build: .
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.venv
+    env_file:
+      - .env
+    ports:
+      - "8050:8050"  # For Dash/visualization
+    command: python telegram_bot.py
+    restart: unless-stopped
+
+  visualization:
+    build: .
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.venv
+    env_file:
+      - .env
+    ports:
+      - "8051:8051"  # For additional visualization services
+    command: python visualization/realtime.py
+    depends_on:
+      - flash-loan-bot 

@@ -15,9 +15,13 @@ UNISWAP_V2_SUBGRAPH = "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v
 
 # Base Chain Graph URLs
 GRAPH_ENDPOINTS = {
+    'uniswap_v3': 'https://api.thegraph.com/subgraphs/name/messari/uniswap-v3-base',
     'aerodrome': 'https://api.thegraph.com/subgraphs/name/aerodrome-finance/aerodrome-v2-base',
     'baseswap': 'https://api.studio.thegraph.com/query/50526/baseswap-v2/v0.0.1',
-    'alienbase': 'https://api.thegraph.com/subgraphs/name/alienbase/exchange'
+    'alienbase': 'https://api.thegraph.com/subgraphs/name/alienbase/exchange',
+    'pancakeswap': 'https://api.thegraph.com/subgraphs/name/pancakeswap/exchange-v3-base',
+    'sushiswap': 'https://api.thegraph.com/subgraphs/name/sushi-v3/v3-base',
+    'maverick': 'https://api.thegraph.com/subgraphs/name/maverick-protocol/base'
 }
 
 async def fetch_uniswap_v3_data(session: aiohttp.ClientSession, pool_address: str) -> Dict:
@@ -150,57 +154,115 @@ async def fetch_dex_data(session: aiohttp.ClientSession, dex_name: str, dex_info
         logger.error(f"No subgraph endpoint for {dex_name}")
         return None
 
-    # Query for DEX-specific data
-    query = """
-    {
-      pairs(first: 100, orderBy: reserveUSD, orderDirection: desc) {
-        id
-        token0 {
-          id
-          symbol
-          decimals
+    # Handle different DEX types
+    if dex_info['type'] == 'UniswapV3' or dex_name == 'maverick':
+        # Query for concentrated liquidity DEXes
+        query = """
+        {
+          pools(first: 100, orderBy: liquidity, orderDirection: desc) {
+            id
+            token0 {
+              id
+              symbol
+              decimals
+            }
+            token1 {
+              id
+              symbol
+              decimals
+            }
+            liquidity
+            volumeUSD
+            feeTier
+            sqrtPrice
+            tick
+          }
         }
-        token1 {
-          id
-          symbol
-          decimals
+        """
+    else:
+        # Query for traditional AMM DEXes
+        query = """
+        {
+          pairs(first: 100, orderBy: reserveUSD, orderDirection: desc) {
+            id
+            token0 {
+              id
+              symbol
+              decimals
+            }
+            token1 {
+              id
+              symbol
+              decimals
+            }
+            reserve0
+            reserve1
+            reserveUSD
+            volumeUSD
+            token0Price
+            token1Price
+          }
         }
-        reserve0
-        reserve1
-        reserveUSD
-        volumeUSD
-        token0Price
-        token1Price
-      }
-    }
-    """
+        """
 
     try:
         async with session.post(GRAPH_ENDPOINTS[dex_name], json={'query': query}) as response:
             data = await response.json()
-            pairs = data['data']['pairs']
             
-            # Process pairs and return relevant data
-            processed_pairs = {}
-            for pair in pairs:
-                key = f"{pair['token0']['symbol']}/{pair['token1']['symbol']}"
-                processed_pairs[key] = {
-                    'address': pair['id'],
-                    'reserve0': float(pair['reserve0']),
-                    'reserve1': float(pair['reserve1']),
-                    'reserveUSD': float(pair['reserveUSD']),
-                    'volumeUSD': float(pair['volumeUSD']),
-                    'price0': float(pair['token0Price']),
-                    'price1': float(pair['token1Price']),
-                    'liquidity_score': calculate_liquidity_score(pair),
-                    'volume_score': calculate_volume_score(pair)
-                }
+            if dex_info['type'] == 'UniswapV3' or dex_name == 'maverick':
+                pools = data['data']['pools']
+                # Process concentrated liquidity pools
+                processed_pairs = {}
+                for pool in pools:
+                    key = f"{pool['token0']['symbol']}/{pool['token1']['symbol']}"
+                    processed_pairs[key] = {
+                        'address': pool['id'],
+                        'liquidity': float(pool['liquidity']),
+                        'volumeUSD': float(pool['volumeUSD']),
+                        'feeTier': int(pool['feeTier']),
+                        'sqrtPrice': pool['sqrtPrice'],
+                        'tick': int(pool['tick']),
+                        'liquidity_score': calculate_liquidity_score_v3(pool),
+                        'volume_score': calculate_volume_score_v3(pool)
+                    }
+            else:
+                pairs = data['data']['pairs']
+                # Process traditional AMM pairs
+                processed_pairs = {}
+                for pair in pairs:
+                    key = f"{pair['token0']['symbol']}/{pair['token1']['symbol']}"
+                    processed_pairs[key] = {
+                        'address': pair['id'],
+                        'reserve0': float(pair['reserve0']),
+                        'reserve1': float(pair['reserve1']),
+                        'reserveUSD': float(pair['reserveUSD']),
+                        'volumeUSD': float(pair['volumeUSD']),
+                        'price0': float(pair['token0Price']),
+                        'price1': float(pair['token1Price']),
+                        'liquidity_score': calculate_liquidity_score(pair),
+                        'volume_score': calculate_volume_score(pair)
+                    }
             
             return processed_pairs
             
     except Exception as e:
         logger.error(f"Error fetching {dex_name} data: {str(e)}")
         return None
+
+def calculate_liquidity_score_v3(pool: Dict) -> float:
+    """Calculate liquidity score for concentrated liquidity pools"""
+    liquidity = float(pool['liquidity'])
+    volume = float(pool['volumeUSD'])
+    
+    # Higher score for pools with higher liquidity and volume
+    return (liquidity * 0.7 + volume * 0.3) / 1e6
+
+def calculate_volume_score_v3(pool: Dict) -> float:
+    """Calculate volume score for concentrated liquidity pools"""
+    volume = float(pool['volumeUSD'])
+    
+    # Normalize volume score
+    return min(1.0, volume / 1e6)
 
 async def fetch_lending_protocol_data(session: aiohttp.ClientSession, protocol_name: str) -> Dict:
     """Fetch data from lending protocols on Base"""
@@ -318,3 +380,46 @@ def calculate_utilization(reserve: Dict, protocol_type: str) -> float:
         return 0
         
     return min(1.0, total_debt / total_deposits) 
+
+async def fetch_maverick_data(session: aiohttp.ClientSession, pool_address: str) -> Dict:
+    """Fetch market data from Maverick Protocol"""
+    query = """
+    {
+      pool(id: "%s") {
+        token0Price
+        token1Price
+        liquidity
+        volumeUSD
+        feeTier
+        activeTick
+        sqrtPrice
+        token0 {
+          symbol
+          decimals
+        }
+        token1 {
+          symbol
+          decimals
+        }
+      }
+    }
+    """ % pool_address.lower()
+
+    try:
+        async with session.post(GRAPH_ENDPOINTS['maverick'], json={'query': query}) as response:
+            data = await response.json()
+            pool = data['data']['pool']
+            
+            return {
+                'price_impact': calculate_price_impact_v3(pool),  # Maverick uses similar mechanics to Uniswap V3
+                'liquidity': float(pool['liquidity']),
+                'volatility': calculate_volatility_v3(pool),
+                'volume_24h': float(pool['volumeUSD']),
+                'fee_tier': int(pool['feeTier']),
+                'current_tick': int(pool['activeTick']),
+                'sqrt_price': pool['sqrtPrice']
+            }
+            
+    except Exception as e:
+        logger.error(f"Error fetching Maverick data: {str(e)}")
+        return None 

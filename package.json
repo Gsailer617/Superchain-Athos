@@ -1,0 +1,23 @@
+{
+  "name": "flash-loan-arbitrage",
+  "version": "1.0.0",
+  "description": "Flash loan arbitrage bot for Base mainnet",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:mainnet": "hardhat run scripts/deploy.js --network base",
+    "verify": "hardhat verify --network base",
+    "upgrade": "hardhat run scripts/upgrade.js --network base"
+  },
+  "dependencies": {
+    "@aave/core-v3": "1.18.0",
+    "@openzeppelin/contracts": "4.9.3",
+    "@openzeppelin/contracts-upgradeable": "4.9.3"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/hardhat-upgrades": "^3.9.0",
+    "dotenv": "^16.4.7",
+    "ethers": "6.9.0",
+    "hardhat": "2.19.4"
+  }
+}
