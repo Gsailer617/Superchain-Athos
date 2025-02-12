@@ -1,0 +1,296 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "title": "Trading Overview",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Total Profit/Loss (24h)",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(increase(trading_profit_total[24h]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 0, "color": "yellow" },
+                  { "value": 1000, "color": "green" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Success Rate by Token",
+          "type": "bargauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (token) (rate(trading_success_total[24h])) / sum by (token) (rate(trading_attempts_total[24h]))",
+              "refId": "A",
+              "legendFormat": "{{token}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Performance Metrics",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "ROI by Strategy",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (strategy) (increase(trading_profit_total[1h])) / sum by (strategy) (increase(trading_investment_total[1h])) * 100",
+              "refId": "A",
+              "legendFormat": "{{strategy}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            }
+          }
+        },
+        {
+          "title": "Win/Loss Ratio",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(increase(trading_wins_total[24h])) / sum(increase(trading_losses_total[24h]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 3,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 1, "color": "yellow" },
+                  { "value": 1.5, "color": "green" }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Risk Metrics",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Maximum Drawdown",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "max_over_time(trading_drawdown_percent[24h])",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100
+            }
+          }
+        },
+        {
+          "title": "Value at Risk (VaR)",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum(rate(trading_profit_histogram_bucket[24h])) by (le))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Trading Activity",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Trading Volume by DEX",
+          "type": "piechart",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (dex) (increase(trading_volume_total[24h]))",
+              "refId": "A",
+              "legendFormat": "{{dex}}"
+            }
+          ]
+        },
+        {
+          "title": "Active Positions",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (token) (trading_active_positions)",
+              "refId": "A",
+              "legendFormat": "{{token}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Gas & Execution",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Gas Costs",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(rate(trading_gas_cost_total[5m]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyETH"
+            }
+          }
+        },
+        {
+          "title": "Execution Success Rate",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(rate(trading_execution_success_total[5m])) / sum(rate(trading_execution_attempts_total[5m]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 0.95, "color": "yellow" },
+                  { "value": 0.98, "color": "green" }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Slippage Analysis",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Average Slippage by Token",
+          "type": "bargauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "avg by (token) (rate(trading_slippage_total[1h]) / rate(trading_execution_success_total[1h]))",
+              "refId": "A",
+              "legendFormat": "{{token}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 5
+            }
+          }
+        },
+        {
+          "title": "Failed Trades by Reason",
+          "type": "piechart",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (reason) (increase(trading_failures_total[24h]))",
+              "refId": "A",
+              "legendFormat": "{{reason}}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["trading", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "name": "token",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(trading_volume_total, token)"
+      },
+      {
+        "name": "dex",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(trading_volume_total, dex)"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Trading Performance Dashboard",
+  "version": 1
+} 

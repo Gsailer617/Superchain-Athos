@@ -1,0 +1,143 @@
+{
+    "monitoring": {
+        "prometheus_port": 8000,
+        "cache_enabled": true,
+        "max_memory_entries": 10000,
+        "flush_interval": 100,
+        "trade_cache_ttl": 3600,
+        
+        "redis": {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+            "password": null
+        },
+        
+        "storage": {
+            "base_path": "data/monitoring",
+            "max_file_age_days": 30,
+            "compression": "snappy"
+        },
+        
+        "intervals": {
+            "system_monitor": 60,
+            "performance_analysis": 300,
+            "cache_cleanup": 3600
+        },
+        
+        "thresholds": {
+            "cpu_warning": 80,
+            "memory_warning": 85,
+            "disk_warning": 90,
+            "latency_warning": 2.0,
+            "error_rate_warning": 0.1
+        },
+        
+        "visualization": {
+            "dashboard_port": 8050,
+            "update_intervals": {
+                "fast": 10,
+                "medium": 30,
+                "slow": 300
+            },
+            "chart_defaults": {
+                "height": 400,
+                "theme": "dark"
+            }
+        },
+        
+        "learning": {
+            "feature_generation": {
+                "lookback_periods": ["1h", "4h", "24h", "7d"],
+                "rolling_windows": ["5m", "15m", "1h", "4h"],
+                "min_samples": 100
+            },
+            "analysis": {
+                "correlation_threshold": 0.3,
+                "significance_level": 0.05,
+                "min_profit_threshold": 0.0
+            }
+        },
+        
+        "alerts": {
+            "enabled": true,
+            "channels": {
+                "slack": {
+                    "enabled": false,
+                    "webhook_url": null
+                },
+                "telegram": {
+                    "enabled": true,
+                    "bot_token": null,
+                    "chat_id": null
+                },
+                "email": {
+                    "enabled": false,
+                    "smtp_server": null,
+                    "smtp_port": 587,
+                    "sender": null,
+                    "recipients": []
+                }
+            },
+            "rules": {
+                "high_cpu": {
+                    "threshold": 80,
+                    "duration": "5m",
+                    "severity": "warning"
+                },
+                "high_memory": {
+                    "threshold": 85,
+                    "duration": "5m",
+                    "severity": "warning"
+                },
+                "low_success_rate": {
+                    "threshold": 0.8,
+                    "duration": "15m",
+                    "severity": "critical"
+                },
+                "negative_profit": {
+                    "duration": "30m",
+                    "severity": "critical"
+                },
+                "high_latency": {
+                    "threshold": 2.0,
+                    "duration": "5m",
+                    "severity": "warning"
+                }
+            }
+        },
+        
+        "logging": {
+            "level": "INFO",
+            "format": "structured",
+            "file": {
+                "enabled": true,
+                "path": "logs/monitoring.log",
+                "max_size_mb": 100,
+                "backup_count": 5
+            },
+            "console": {
+                "enabled": true,
+                "color": true
+            }
+        },
+        
+        "metrics": {
+            "collection": {
+                "system_resources": true,
+                "trade_performance": true,
+                "strategy_analysis": true,
+                "gas_optimization": true
+            },
+            "retention": {
+                "high_resolution": "7d",
+                "medium_resolution": "30d",
+                "low_resolution": "365d"
+            },
+            "aggregation": {
+                "intervals": ["1m", "5m", "1h", "1d"],
+                "functions": ["mean", "sum", "min", "max", "count"]
+            }
+        }
+    }
+} 

@@ -1,0 +1,145 @@
+groups:
+  - name: system_alerts
+    rules:
+      - alert: HighCPUUsage
+        expr: system_cpu_percent > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High CPU usage detected
+          description: CPU usage is above 85% for more than 5 minutes
+      
+      - alert: HighMemoryUsage
+        expr: system_memory_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High memory usage detected
+          description: Memory usage is above 90% for more than 5 minutes
+      
+      - alert: DiskSpaceCritical
+        expr: system_disk_usage_percent > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Critical disk space usage
+          description: Disk usage is above 90% for more than 5 minutes
+  
+  - name: trading_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(errors_total[5m])) / sum(rate(operations_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High error rate detected
+          description: Error rate is above 5% for more than 5 minutes
+      
+      - alert: LowAPISuccessRate
+        expr: sum(rate(operations_total{status="success"}[5m])) / sum(rate(operations_total[5m])) < 0.95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Low API success rate
+          description: API success rate is below 95% for more than 5 minutes
+      
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, sum(rate(execution_time_seconds_bucket[5m])) by (le)) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High operation latency
+          description: 95th percentile latency is above 1 second for more than 5 minutes
+      
+      - alert: TradingLoss
+        expr: profit_loss < -1000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Significant trading loss detected
+          description: Trading loss exceeds $1000
+  
+  - name: network_alerts
+    rules:
+      - alert: HighNetworkUsage
+        expr: rate(system_network_io_bytes{direction="bytes_sent"}[5m]) > 1e7 or rate(system_network_io_bytes{direction="bytes_recv"}[5m]) > 1e7
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High network usage
+          description: Network I/O exceeds 10MB/s for more than 5 minutes
+      
+      - alert: NetworkErrors
+        expr: rate(network_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Network errors detected
+          description: Network errors have been detected in the last 5 minutes
+  
+  - name: service_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Service is down
+          description: Service has been down for more than 1 minute
+      
+      - alert: HighGoroutines
+        expr: go_goroutines > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High number of goroutines
+          description: Number of goroutines is above 10000 for more than 5 minutes
+      
+      - alert: SlowGarbageCollection
+        expr: rate(go_gc_duration_seconds_sum[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Slow garbage collection
+          description: Garbage collection is taking more than 100ms on average
+  
+  - name: business_alerts
+    rules:
+      - alert: NoTrades
+        expr: rate(trade_volume_total[1h]) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: No trading activity
+          description: No trades have been executed in the last hour
+      
+      - alert: UnusualTradeVolume
+        expr: sum(rate(trade_volume_total[5m])) > historicalAvg * 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Unusual trading volume
+          description: Trading volume is 3x higher than historical average
+      
+      - alert: HighSlippage
+        expr: avg_over_time(slippage_percent[5m]) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High slippage detected
+          description: Average slippage is above 1% for more than 5 minutes 

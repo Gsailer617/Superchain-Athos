@@ -1,0 +1,53 @@
+global:
+  resolve_timeout: 5m
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+  telegram_api_url: 'https://api.telegram.org'
+  telegram_bot_token: '${TELEGRAM_BOT_TOKEN}'
+
+route:
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'team-arbitrage'
+  routes:
+    - match:
+        severity: critical
+      receiver: 'team-arbitrage-urgent'
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: 'team-arbitrage'
+    slack_configs:
+      - channel: '#arbitrage-alerts'
+        title: '{{ template "slack.title" . }}'
+        text: '{{ template "slack.text" . }}'
+        send_resolved: true
+    telegram_configs:
+      - chat_id: ${TELEGRAM_CHAT_ID}
+        parse_mode: 'HTML'
+        message: '{{ template "telegram.message" . }}'
+        send_resolved: true
+
+  - name: 'team-arbitrage-urgent'
+    slack_configs:
+      - channel: '#arbitrage-urgent'
+        title: '🚨 {{ template "slack.title" . }}'
+        text: '{{ template "slack.text" . }}'
+        send_resolved: true
+    telegram_configs:
+      - chat_id: ${TELEGRAM_URGENT_CHAT_ID}
+        parse_mode: 'HTML'
+        message: '🚨 {{ template "telegram.message" . }}'
+        send_resolved: true
+
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname'] 

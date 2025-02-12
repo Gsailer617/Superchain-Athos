@@ -1,0 +1,303 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "Model Performance Overview",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Model Prediction Accuracy",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "model_prediction_accuracy",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 0.7, "color": "yellow" },
+                  { "value": 0.85, "color": "green" }
+                ]
+              },
+              "unit": "percentunit"
+            }
+          }
+        },
+        {
+          "title": "Model Latency",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(model_inference_duration_seconds_sum[5m]) / rate(model_inference_duration_seconds_count[5m])",
+              "refId": "A",
+              "legendFormat": "Average Inference Time"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Training Metrics",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Training Loss",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "training_loss",
+              "refId": "A",
+              "legendFormat": "Loss"
+            }
+          ]
+        },
+        {
+          "title": "Validation Metrics",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "validation_metrics{metric='precision'}",
+              "refId": "A",
+              "legendFormat": "Precision"
+            },
+            {
+              "expr": "validation_metrics{metric='recall'}",
+              "refId": "B",
+              "legendFormat": "Recall"
+            },
+            {
+              "expr": "validation_metrics{metric='f1'}",
+              "refId": "C",
+              "legendFormat": "F1 Score"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Resource Utilization",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "GPU Memory Usage",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "gpu_memory_used_bytes / gpu_memory_total_bytes",
+              "refId": "A",
+              "legendFormat": "GPU {{gpu_id}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit"
+            }
+          }
+        },
+        {
+          "title": "Model Memory Usage",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "process_resident_memory_bytes{job='ml-service'}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Trading Performance",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Prediction Success Rate",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(rate(trading_predictions_success_total[1h])) / sum(rate(trading_predictions_total[1h]))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 0.6, "color": "yellow" },
+                  { "value": 0.8, "color": "green" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Profit by Model Version",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (model_version) (trading_profit_total)",
+              "refId": "A",
+              "legendFormat": "Model {{model_version}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Model Drift Monitoring",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Feature Distribution Changes",
+          "type": "heatmap",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "feature_distribution_changes",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Prediction Distribution",
+          "type": "histogram",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "prediction_distribution",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Error Analysis",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Error Distribution by Type",
+          "type": "piechart",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (error_type) (model_errors_total)",
+              "refId": "A",
+              "legendFormat": "{{error_type}}"
+            }
+          ]
+        },
+        {
+          "title": "Error Rate Over Time",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(model_errors_total[5m])",
+              "refId": "A",
+              "legendFormat": "{{error_type}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Model Retraining",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Time Since Last Retraining",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "time() - last_model_training_timestamp",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "green" },
+                  { "value": 86400, "color": "yellow" },
+                  { "value": 172800, "color": "red" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Training Duration History",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "model_training_duration_seconds",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["ml", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "name": "model_version",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(model_version)"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ML Model Monitoring",
+  "version": 1
+} 

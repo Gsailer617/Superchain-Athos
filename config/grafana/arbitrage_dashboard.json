@@ -1,0 +1,337 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "System Health Overview",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "System Resource Usage",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "system_cpu_usage_percent",
+              "legendFormat": "CPU Usage %"
+            },
+            {
+              "expr": "system_memory_usage_bytes / 1024 / 1024 / 1024",
+              "legendFormat": "Memory Usage (GB)"
+            },
+            {
+              "expr": "rate(network_latency_seconds_sum[5m])",
+              "legendFormat": "Network Latency (5m avg)"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 70 },
+                  { "color": "red", "value": 85 }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Trading Performance",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Profit/Loss Over Time",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(current_profit_usd) by (strategy)",
+              "legendFormat": "{{strategy}}"
+            }
+          ],
+          "options": {
+            "tooltip": {
+              "mode": "multi"
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth",
+                "fillOpacity": 10
+              },
+              "unit": "currencyUSD"
+            }
+          }
+        },
+        {
+          "title": "Transaction Success Rate",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(successful_arbitrage_transactions_total) / sum(arbitrage_transactions_total) * 100",
+              "legendFormat": "Success Rate"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 85 },
+                  { "color": "green", "value": 95 }
+                ]
+              },
+              "unit": "percent"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Gas Analytics",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Gas Price Trends",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "current_gas_price_gwei",
+              "legendFormat": "Gas Price (Gwei)"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "smooth"
+              },
+              "unit": "none"
+            }
+          }
+        },
+        {
+          "title": "Gas Optimization Savings",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum(gas_savings_total)",
+              "legendFormat": "Total Gas Saved"
+            }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Strategy Analysis",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Strategy Success Rates",
+          "type": "bargauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "strategy_success_rate",
+              "legendFormat": "{{strategy}}"
+            }
+          ],
+          "options": {
+            "orientation": "horizontal",
+            "displayMode": "gradient"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "mode": "percentage",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 70 },
+                  { "color": "green", "value": 90 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Strategy Execution Times",
+          "type": "heatmap",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(strategy_execution_time_seconds_bucket[5m])",
+              "legendFormat": "{{strategy}} {{le}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Error Monitoring",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Error Rate by Type",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(error_count_total[5m])",
+              "legendFormat": "{{error_type}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "bars",
+                "fillOpacity": 70
+              }
+            }
+          }
+        },
+        {
+          "title": "Recent Errors",
+          "type": "table",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "error_details",
+              "instant": true,
+              "legendFormat": ""
+            }
+          ],
+          "options": {
+            "showHeader": true
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "left",
+                "displayMode": "auto"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Network Health",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Network Latency Distribution",
+          "type": "heatmap",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(network_latency_seconds_bucket[5m])",
+              "legendFormat": "{{le}}"
+            }
+          ]
+        },
+        {
+          "title": "RPC Node Health",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rpc_node_health",
+              "legendFormat": "{{node}}"
+            }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto"
+          }
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 27,
+  "style": "dark",
+  "tags": ["arbitrage", "defi", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "name": "timerange",
+        "type": "interval",
+        "query": "1m,5m,15m,30m,1h,6h,12h,24h,7d",
+        "current": {
+          "selected": true,
+          "text": "1h",
+          "value": "1h"
+        }
+      },
+      {
+        "name": "strategy",
+        "type": "query",
+        "query": "label_values(strategy_success_rate, strategy)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h"]
+  },
+  "timezone": "browser",
+  "title": "Arbitrage Performance Dashboard",
+  "version": 2
+} 

@@ -6,9 +6,8 @@ import numpy as np
 import os
 from dotenv import load_dotenv
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
 
-from ..core.types import (
+from src.core.types import (
     TokenPair, MarketDataType, OpportunityType,
     FlashLoanOpportunityType
 )
@@ -43,9 +42,6 @@ class BaseStrategy:
                 'headers': {'User-Agent': 'FlashingBase/1.0.0'}
             }
         ))
-        
-        # Add PoA middleware for Base
-        self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
         
         if not self.web3.is_connected():
             raise ValueError("Failed to connect to Base mainnet via Alchemy")

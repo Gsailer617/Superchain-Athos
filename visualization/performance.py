@@ -24,6 +24,7 @@ import socket
 import aiohttp
 import json
 from pathlib import Path
+from datetime import datetime, timedelta
 
 logger = structlog.get_logger(__name__)
 
@@ -69,15 +70,15 @@ METRICS = {
 @dataclass
 class PerformanceConfig:
     """Configuration for performance monitoring"""
-    cpu_threshold: float = 80.0  # CPU usage threshold (%)
-    memory_threshold: float = 85.0  # Memory usage threshold (%)
-    render_time_threshold: float = 2.0  # Render time threshold (seconds)
-    monitoring_interval: float = 1.0  # Monitoring interval (seconds)
-    enable_suggestions: bool = True
-    enable_metrics: bool = True
+    cpu_threshold: float = 90.0  # CPU usage threshold (%)
+    memory_threshold: float = 90.0  # Memory usage threshold (%)
+    render_time_threshold: float = 5.0  # Chart render time threshold (seconds)
+    monitoring_interval: float = 0.1  # Monitoring interval (seconds)
+    enable_suggestions: bool = True  # Enable performance suggestions
+    enable_metrics: bool = True  # Enable Prometheus metrics
     log_to_file: bool = False
     log_file_path: str = "performance.log"
-    network_check_urls: List[str] = None  # URLs to check for network latency
+    network_check_urls: Optional[List[str]] = None  # URLs to check for network latency
     test_mode: bool = False  # Enable test mode for integration testing
 
 class PerformanceMonitor:
@@ -93,19 +94,67 @@ class PerformanceMonitor:
     - Background monitoring task
     """
     
-    def __init__(self, config: PerformanceConfig):
-        self.config = config
+    def __init__(self, config: Optional[PerformanceConfig] = None):
+        self.config = config or PerformanceConfig()
         self._monitoring_task: Optional[asyncio.Task] = None
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._is_running = False
         self._lock = threading.Lock()
-        self._performance_history: List[Dict[str, float]] = []
+        self._performance_history: List[Dict[str, Any]] = []
+        self._suggestions: List[str] = []  # Store suggestions
         
         # Initialize metrics
         if self.config.enable_metrics:
-            for metric in METRICS.values():
-                if isinstance(metric, (Counter, Gauge)):
-                    metric.set(0)
+            self._setup_metrics()
+    
+    def _setup_metrics(self) -> None:
+        """Initialize metric tracking"""
+        from prometheus_client import CollectorRegistry
+        self.registry = CollectorRegistry()
+        
+        self.metrics = {
+            'cpu_usage': Gauge('cpu_usage_percent', 'CPU usage percentage', registry=self.registry),
+            'memory_usage': Gauge('memory_usage_bytes', 'Memory usage in bytes', registry=self.registry),
+            'render_time': Histogram(
+                'render_time_seconds',
+                'Time taken for rendering operations',
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0],
+                registry=self.registry
+            ),
+            'error_count': Counter('error_count_total', 'Total number of errors', ['type'], registry=self.registry),
+            'io_wait': Gauge('io_wait_percent', 'IO wait percentage', registry=self.registry),
+            'network_latency': Histogram(
+                'network_latency_seconds',
+                'Network operation latency',
+                buckets=[0.01, 0.05, 0.1, 0.5, 1.0],
+                registry=self.registry
+            ),
+            'chart_render_time': Histogram(
+                'chart_render_time_seconds',
+                'Time taken for chart rendering',
+                ['chart_type'],
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0],
+                registry=self.registry
+            ),
+            'websocket_latency': Histogram(
+                'websocket_latency_seconds',
+                'WebSocket message latency',
+                buckets=[0.001, 0.01, 0.1, 0.5, 1.0],
+                registry=self.registry
+            ),
+            'data_update_frequency': Counter(
+                'data_update_total',
+                'Number of data updates',
+                ['component'],
+                registry=self.registry
+            ),
+            'chart_interaction_count': Counter(
+                'chart_interaction_total',
+                'Number of chart interactions',
+                ['action'],
+                registry=self.registry
+            )
+        }
     
     async def start_monitoring(self) -> None:
         """Start the performance monitoring loop"""
@@ -157,8 +206,12 @@ class PerformanceMonitor:
                     METRICS['error_count'].labels(type='monitoring').inc()
                 await asyncio.sleep(self.config.monitoring_interval)
     
-    async def _collect_metrics(self) -> Dict[str, float]:
-        """Collect current performance metrics"""
+    async def _collect_metrics(self) -> Dict[str, Union[float, str]]:
+        """Collect current performance metrics
+        
+        Returns:
+            Dictionary containing metrics with float values and timestamp as string
+        """
         try:
             # Run CPU-bound operations in thread pool
             loop = asyncio.get_event_loop()
@@ -171,52 +224,73 @@ class PerformanceMonitor:
                 lambda: psutil.Process().memory_info()
             )
             
-            io_counters = await loop.run_in_executor(
-                self._executor,
-                lambda: psutil.disk_io_counters()
-            )
-            
             # Get base metrics
             metrics = {
-                'cpu_usage': cpu_usage,
-                'memory_usage': memory.rss,
-                'memory_percent': memory.rss / psutil.virtual_memory().total * 100,
-                'io_wait': io_counters.read_time + io_counters.write_time,
-                'timestamp': time.time()
+                'cpu_usage': float(cpu_usage),
+                'memory_usage': float(memory.rss),
+                'memory_percent': float(memory.rss / psutil.virtual_memory().total * 100),
+                'timestamp': datetime.now().isoformat()
             }
             
+            # Add IO metrics if available
+            try:
+                io_counters = psutil.disk_io_counters()
+                if io_counters:
+                    metrics['io_wait'] = float(io_counters.read_time + io_counters.write_time)
+            except Exception:
+                metrics['io_wait'] = 0.0
+            
             # Add visualization-specific metrics
-            metrics.update({
-                'chart_count': len([
-                    m for m in METRICS['chart_render_time'].collect()[0].samples
-                    if m.name.endswith('_count')
-                ]),
-                'interaction_rate': sum(
-                    m.value for m in METRICS['chart_interaction_count'].collect()[0].samples
-                ) / 60,  # interactions per minute
-                'update_frequency': sum(
-                    m.value for m in METRICS['data_update_frequency'].collect()[0].samples
-                ) / 60  # updates per minute
-            })
+            if hasattr(self, 'metrics'):
+                chart_samples = self.metrics['chart_render_time'].collect()
+                interaction_samples = self.metrics['chart_interaction_count'].collect()
+                update_samples = self.metrics['data_update_frequency'].collect()
+                
+                metrics.update({
+                    'chart_count': float(len(chart_samples)),
+                    'interaction_rate': float(sum(s.value for s in interaction_samples) / 60),
+                    'update_frequency': float(sum(s.value for s in update_samples) / 60)
+                })
             
             return metrics
             
         except Exception as e:
-            logger.error("Error collecting extended metrics", error=str(e))
-            return {}
+            logger.error("Error collecting metrics", error=str(e))
+            return {
+                'cpu_usage': 0.0,
+                'memory_usage': 0.0,
+                'memory_percent': 0.0,
+                'io_wait': 0.0,
+                'timestamp': datetime.now().isoformat()
+            }
     
-    def _update_prometheus_metrics(self, metrics: Dict[str, float]) -> None:
-        """Update Prometheus metrics with current values"""
+    def _update_prometheus_metrics(self, metrics: Dict[str, Union[float, str]]) -> None:
+        """Update Prometheus metrics with current values
+        
+        Args:
+            metrics: Dictionary containing metrics with float values and timestamp as string
+        """
         try:
-            if 'cpu_usage' in metrics:
-                METRICS['cpu_usage'].set(metrics['cpu_usage'])
-            if 'memory_usage' in metrics:
-                METRICS['memory_usage'].set(metrics['memory_usage'])
-            if 'io_wait' in metrics:
-                METRICS['io_wait'].set(metrics['io_wait'])
+            if not hasattr(self, 'metrics'):
+                return
+                
+            # Update numeric metrics only
+            numeric_metrics = {
+                k: v for k, v in metrics.items() 
+                if isinstance(v, (int, float)) and k in self.metrics
+            }
+            
+            for name, value in numeric_metrics.items():
+                if name in self.metrics:
+                    if isinstance(self.metrics[name], (Gauge, Counter)):
+                        self.metrics[name].set(value)
+                    elif isinstance(self.metrics[name], Histogram):
+                        self.metrics[name].observe(value)
+                        
         except Exception as e:
             logger.error("Error updating Prometheus metrics", error=str(e))
-            METRICS['error_count'].labels(type='prometheus').inc()
+            if hasattr(self, 'metrics') and 'error_count' in self.metrics:
+                self.metrics['error_count'].labels(type='prometheus').inc()
     
     async def _check_thresholds(self, metrics: Dict[str, float]) -> None:
         """Check resource thresholds and generate optimization suggestions"""
@@ -402,26 +476,79 @@ class PerformanceMonitor:
 
     async def run_health_check(self) -> Dict[str, Any]:
         """Run a comprehensive health check"""
-        metrics = await self._collect_metrics()
-        network_health = await self.check_network_health()
-        
-        return {
-            'system_metrics': metrics,
-            'network_health': network_health,
-            'suggestions': self._generate_optimization_suggestions(metrics),
-            'status': 'healthy' if all(
-                m < t for m, t in [
-                    (metrics.get('cpu_usage', 0), self.config.cpu_threshold),
-                    (metrics.get('memory_percent', 0), self.config.memory_threshold)
-                ]
-            ) else 'degraded'
-        }
+        try:
+            # Get current metrics
+            cpu_percent = psutil.cpu_percent()
+            memory_percent = psutil.Process().memory_percent()
+            
+            # Calculate average render time
+            render_times = [
+                h.get('render_time', 0.0) 
+                for h in self._performance_history[-100:]
+            ]
+            avg_render_time = sum(render_times) / len(render_times) if render_times else 0
+            
+            # Determine system health
+            is_healthy = (
+                cpu_percent < self.config.cpu_threshold and
+                memory_percent < self.config.memory_threshold and
+                avg_render_time < self.config.render_time_threshold
+            )
+            
+            # Generate suggestions if enabled
+            suggestions = []
+            if self.config.enable_suggestions:
+                if cpu_percent > self.config.cpu_threshold:
+                    suggestions.append(
+                        "Consider reducing update frequency or optimizing computations"
+                    )
+                if memory_percent > self.config.memory_threshold:
+                    suggestions.append(
+                        "Consider implementing data cleanup or reducing cache size"
+                    )
+                if avg_render_time > self.config.render_time_threshold:
+                    suggestions.append(
+                        "Consider optimizing chart rendering or reducing data points"
+                    )
+            
+            return {
+                'status': 'healthy' if is_healthy else 'degraded',
+                'cpu_percent': cpu_percent,
+                'memory_percent': memory_percent,
+                'avg_render_time': avg_render_time,
+                'suggestions': suggestions,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error("Error running health check", error=str(e))
+            return {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+
+    def get_performance_history(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """Get performance history within the specified time range"""
+        if not start_time:
+            start_time = datetime.now() - timedelta(hours=1)
+        if not end_time:
+            end_time = datetime.now()
+            
+        return [
+            entry for entry in self._performance_history
+            if start_time <= datetime.fromisoformat(entry['timestamp']) <= end_time
+        ]
 
     async def export_metrics(self, export_path: str) -> None:
         """Export metrics to file for analysis"""
         try:
             metrics_data = {
-                'timestamp': time.time(),
+                'timestamp': datetime.now().isoformat(),
                 'metrics': self._performance_history,
                 'summary': self.get_performance_summary()
             }
@@ -436,10 +563,10 @@ class PerformanceMonitor:
 
 # Convenience function to create a monitor instance with default config
 def create_monitor(
-    cpu_threshold: float = 80.0,
-    memory_threshold: float = 85.0,
-    render_time_threshold: float = 2.0,
-    monitoring_interval: float = 1.0,
+    cpu_threshold: float = 90.0,
+    memory_threshold: float = 90.0,
+    render_time_threshold: float = 5.0,
+    monitoring_interval: float = 0.1,
     enable_suggestions: bool = True,
     enable_metrics: bool = True
 ) -> PerformanceMonitor:

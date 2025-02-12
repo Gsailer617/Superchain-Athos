@@ -23,6 +23,7 @@ import time
 import traceback
 from functools import lru_cache
 import structlog
+import re
 
 from utils.performance_tracking import PerformanceTracker
 from utils.visualization_utils import VisualizationUtils
@@ -216,6 +217,14 @@ class TelegramBot:
         self.command_handlers.extend([
             CommandHandler('suggest', self.handle_suggestion),
             CommandHandler('parameters', self.show_current_parameters)
+        ])
+
+        # Add command handlers for token management
+        self.command_handlers.extend([
+            CommandHandler('addtoken', self.handle_add_token),
+            CommandHandler('removetoken', self.handle_remove_token),
+            CommandHandler('listtokens', self.handle_list_tokens),
+            CommandHandler('tokeninfo', self.handle_token_info)
         ])
 
         # Initialize LLM interface
@@ -1414,14 +1423,82 @@ Profit: ${(worst_trade['profit'] if worst_trade is not None else 0):.2f}
             # Get user message and ID
             message = update.effective_message
             user_id = message.from_user.id if message.from_user else None
+            text = message.text.lower()
             
             if not user_id:
                 return
-                
-            # Process message through LLM interface
-            response = await self.llm.process_query(message.text, user_id)
-            
-            # Send response
+
+            # Check if user is admin
+            if user_id not in self.admin_ids:
+                await message.reply_text("Sorry, only admins can suggest tokens.")
+                return
+
+            # Check for token suggestions in natural language
+            token_patterns = [
+                r'add token (?:address )?(?:is )?([0x][a-fA-F0-9]{40})',
+                r'track (?:token )?(?:address )?([0x][a-fA-F0-9]{40})',
+                r'monitor (?:token )?(?:address )?([0x][a-fA-F0-9]{40})',
+                r'suggest (?:token )?(?:address )?([0x][a-fA-F0-9]{40})',
+                r'check (?:token )?(?:address )?([0x][a-fA-F0-9]{40})'
+            ]
+
+            for pattern in token_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    token_address = match.group(1)
+                    # Process token suggestion
+                    await message.reply_text(f"I'll check token {token_address} for you...")
+                    
+                    if self.agent and self.agent.token_discovery:
+                        # Validate token first
+                        is_valid = await self.agent.token_discovery.validate_token(token_address)
+                        if not is_valid:
+                            await message.reply_text(
+                                f"❌ Token {token_address} failed validation checks.\n"
+                                "The token must meet minimum requirements for liquidity, "
+                                "security, and holder distribution."
+                            )
+                            return
+
+                        # Add to discovered tokens
+                        self.agent.token_discovery.discovered_tokens.add(token_address)
+                        
+                        # Store in Redis for persistence
+                        await self.agent.token_discovery.redis.sadd("discovered_tokens", token_address)
+                        
+                        # Get token info for detailed response
+                        validation_result = await self.agent.token_discovery.get_cached_validation(token_address)
+                        
+                        # Format detailed response
+                        response = (
+                            f"✅ Token {token_address} added successfully!\n\n"
+                            "Token Analysis:\n"
+                        )
+                        
+                        if validation_result:
+                            response += (
+                                f"• Security Score: {validation_result.get('security_score', 0):.2f}\n"
+                                f"• Social Sentiment: {validation_result.get('social_sentiment', {}).get('score', 0):.2f}\n"
+                            )
+                            
+                            # Add metadata if available
+                            metadata = validation_result.get('metadata', {})
+                            if metadata:
+                                response += "\nAdditional Information:\n"
+                                if 'liquidity' in metadata:
+                                    response += f"• Liquidity: ${float(metadata['liquidity']):,.2f}\n"
+                                if 'holder_data' in metadata:
+                                    holder_data = metadata['holder_data']
+                                    response += f"• Total Holders: {holder_data.get('total_holders', 0):,}\n"
+                        
+                        await message.reply_text(response)
+                        return
+                    else:
+                        await message.reply_text("❌ Token discovery system not initialized.")
+                        return
+
+            # If no token suggestion found, process as regular message
+            response = await self.llm.process_query(text, user_id)
             await message.reply_text(response, parse_mode='Markdown')
             
         except Exception as msg_error:
@@ -1573,6 +1650,145 @@ Profit: ${(worst_trade['profit'] if worst_trade is not None else 0):.2f}
         except Exception as e:
             logger.error("Error showing parameters", error=str(e))
             await update.effective_message.reply_text("Error retrieving parameters")
+
+    async def handle_add_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle the /addtoken command to add a new token for discovery"""
+        if not await self._verify_admin(update):
+            return
+
+        try:
+            # Get token address from command
+            if not context.args or len(context.args) < 1:
+                await update.message.reply_text(
+                    "Please provide a token address.\n"
+                    "Usage: /addtoken <token_address>"
+                )
+                return
+
+            token_address = context.args[0]
+            
+            # Validate and add token
+            if self.agent and self.agent.token_discovery:
+                # Validate token first
+                is_valid = await self.agent.token_discovery.validate_token(token_address)
+                if not is_valid:
+                    await update.message.reply_text(f"❌ Token {token_address} failed validation checks.")
+                    return
+
+                # Add to discovered tokens
+                self.agent.token_discovery.discovered_tokens.add(token_address)
+                
+                # Store in Redis for persistence
+                await self.agent.token_discovery.redis.sadd("discovered_tokens", token_address)
+                
+                await update.message.reply_text(f"✅ Token {token_address} added successfully!")
+            else:
+                await update.message.reply_text("❌ Token discovery system not initialized.")
+
+        except Exception as e:
+            logger.error(f"Error adding token: {str(e)}")
+            await update.message.reply_text("❌ Error adding token. Please check the address and try again.")
+
+    async def handle_remove_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle the /removetoken command to remove a token from discovery"""
+        if not await self._verify_admin(update):
+            return
+
+        try:
+            if not context.args or len(context.args) < 1:
+                await update.message.reply_text(
+                    "Please provide a token address.\n"
+                    "Usage: /removetoken <token_address>"
+                )
+                return
+
+            token_address = context.args[0]
+            
+            if self.agent and self.agent.token_discovery:
+                # Remove from both memory and Redis
+                self.agent.token_discovery.discovered_tokens.discard(token_address)
+                await self.agent.token_discovery.redis.srem("discovered_tokens", token_address)
+                
+                await update.message.reply_text(f"✅ Token {token_address} removed successfully!")
+            else:
+                await update.message.reply_text("❌ Token discovery system not initialized.")
+
+        except Exception as e:
+            logger.error(f"Error removing token: {str(e)}")
+            await update.message.reply_text("❌ Error removing token.")
+
+    async def handle_list_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle the /listtokens command to list all discovered tokens"""
+        if not await self._verify_admin(update):
+            return
+
+        try:
+            if self.agent and self.agent.token_discovery:
+                # Get tokens from both memory and Redis
+                memory_tokens = self.agent.token_discovery.discovered_tokens
+                redis_tokens = await self.agent.token_discovery.redis.smembers("discovered_tokens")
+                
+                # Combine and deduplicate
+                all_tokens = set(memory_tokens) | set(redis_tokens)
+                
+                if not all_tokens:
+                    await update.message.reply_text("No tokens currently being tracked.")
+                    return
+                
+                # Format the response
+                response = "📝 Discovered Tokens:\n\n"
+                for token in sorted(all_tokens):
+                    response += f"• {token}\n"
+                
+                await update.message.reply_text(response)
+            else:
+                await update.message.reply_text("❌ Token discovery system not initialized.")
+
+        except Exception as e:
+            logger.error(f"Error listing tokens: {str(e)}")
+            await update.message.reply_text("❌ Error retrieving token list.")
+
+    async def handle_token_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle the /tokeninfo command to get detailed information about a token"""
+        if not await self._verify_admin(update):
+            return
+
+        try:
+            if not context.args or len(context.args) < 1:
+                await update.message.reply_text(
+                    "Please provide a token address.\n"
+                    "Usage: /tokeninfo <token_address>"
+                )
+                return
+
+            token_address = context.args[0]
+            
+            if self.agent and self.agent.token_discovery:
+                # Get token validation and analytics
+                validation_result = await self.agent.token_discovery.get_cached_validation(token_address)
+                if not validation_result:
+                    await update.message.reply_text(f"❌ No information available for token {token_address}")
+                    return
+                
+                # Format the response
+                response = f"📊 Token Information for {token_address}:\n\n"
+                response += f"Security Score: {validation_result.get('security_score', 0):.2f}\n"
+                response += f"Social Sentiment: {validation_result.get('social_sentiment', {}).get('score', 0):.2f}\n"
+                
+                # Add metadata if available
+                metadata = validation_result.get('metadata', {})
+                if metadata:
+                    response += "\nMetadata:\n"
+                    for key, value in metadata.items():
+                        response += f"• {key}: {value}\n"
+                
+                await update.message.reply_text(response)
+            else:
+                await update.message.reply_text("❌ Token discovery system not initialized.")
+
+        except Exception as e:
+            logger.error(f"Error getting token info: {str(e)}")
+            await update.message.reply_text("❌ Error retrieving token information.")
 
 # Initialize Telegram bot
 telegram_bot = TelegramBot() 

@@ -1,0 +1,98 @@
+groups:
+  - name: arbitrage_alerts
+    rules:
+      # System Health Alerts
+      - alert: HighCPUUsage
+        expr: system_cpu_usage_percent > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High CPU usage detected
+          description: CPU usage has been above 80% for 5 minutes
+
+      - alert: HighMemoryUsage
+        expr: system_memory_usage_bytes / (1024 * 1024 * 1024) > 16
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High memory usage detected
+          description: Memory usage has exceeded 16GB for 5 minutes
+
+      # Trading Performance Alerts
+      - alert: LowTransactionSuccessRate
+        expr: (sum(successful_arbitrage_transactions_total) / sum(arbitrage_transactions_total) * 100) < 85
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: Low transaction success rate
+          description: Transaction success rate has fallen below 85% in the last 15 minutes
+
+      - alert: NegativeProfit
+        expr: sum(strategy_profit_usd) < 0
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: Negative profit detected
+          description: Overall profit has been negative for 30 minutes
+
+      # Network Health Alerts
+      - alert: HighNetworkLatency
+        expr: rate(network_latency_seconds_sum[5m]) / rate(network_latency_seconds_count[5m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High network latency
+          description: Average network latency is above 2 seconds
+
+      - alert: RPCNodeDown
+        expr: rpc_node_health == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: RPC node is down
+          description: "RPC node {{ $labels.node }} is not responding"
+
+      # Error Rate Alerts
+      - alert: HighErrorRate
+        expr: rate(error_count_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High error rate detected
+          description: Error rate is above 0.1 errors per second
+
+      # Gas Price Alerts
+      - alert: HighGasPrice
+        expr: current_gas_price_gwei > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: High gas price detected
+          description: Gas price has been above 100 Gwei for 10 minutes
+
+      # Strategy Performance Alerts
+      - alert: StrategyFailure
+        expr: strategy_success_rate < 0.7
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: Strategy performance degradation
+          description: "Strategy {{ $labels.strategy }} success rate has fallen below 70%"
+
+      - alert: SlowStrategyExecution
+        expr: rate(strategy_execution_time_seconds_sum[5m]) / rate(strategy_execution_time_seconds_count[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Slow strategy execution
+          description: "Strategy {{ $labels.strategy }} average execution time is above 5 seconds" 

@@ -1,0 +1,134 @@
+{
+    "baseswap": {
+        "name": "BaseSwap",
+        "factory_address": "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB",
+        "router_address": "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86",
+        "fee_tiers": [100, 500, 3000, 10000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "aerodrome": {
+        "name": "Aerodrome",
+        "factory_address": "0x420DD381b31aEf6683db6B902084cB0FFECe40Da",
+        "router_address": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "swapbased": {
+        "name": "SwapBased",
+        "factory_address": "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB",
+        "router_address": "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "balancer": {
+        "name": "Balancer",
+        "vault_address": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 100000,
+        "max_slippage": 0.02
+    },
+    "uniswap-v3": {
+        "name": "Uniswap V3",
+        "factory_address": "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+        "router_address": "0x2626664c2603336E57B271c5C0b26F421741e481",
+        "quoter_address": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
+        "fee_tiers": [100, 500, 3000, 10000],
+        "min_liquidity_usd": 100000,
+        "max_slippage": 0.02
+    },
+    "sushiswap": {
+        "name": "SushiSwap",
+        "factory_address": "0x71524B4f93c58fcbF659783284E38825f0622859",
+        "router_address": "0x6BDED42c6DA8FD5E8B11852d05692eE20717c7fE",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "pancakeswap": {
+        "name": "PancakeSwap",
+        "factory_address": "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+        "router_address": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",
+        "fee_tiers": [100, 500, 2500, 10000],
+        "min_liquidity_usd": 75000,
+        "max_slippage": 0.02
+    },
+    "curve": {
+        "name": "Curve",
+        "factory_address": "0xd6B8162e2fb9F3EFf09BB8598ca0C8958E33A23D",
+        "router_address": "0x0625aFB445C3B6B7B9Bb98936F5599c4A2494343",
+        "fee_tiers": [100, 300, 1000],
+        "min_liquidity_usd": 150000,
+        "max_slippage": 0.02,
+        "pools": {
+            "tricrypto": {
+                "address": "0x6C7Fd4321183b542E61Cd519F28Cf5539B7394b4",
+                "coins": ["WETH", "USDC", "WBTC"],
+                "fee": 0.0004
+            },
+            "stableswap": {
+                "address": "0x7aE97042a4A0eB4D1eB370C34F9736c7E0AF2EF0",
+                "coins": ["USDC", "USDbC", "USDT"],
+                "fee": 0.0001
+            }
+        }
+    },
+    "morpho": {
+        "name": "Morpho",
+        "router_address": "0x093D2CF57cc765Eab0E5016CF5D95747341Fb9a3",
+        "factory_address": "0x12B5f52939E5F5F66C3D13a0Ea67A8B9f12B2A00",
+        "fee_tiers": [50],
+        "min_liquidity_usd": 100000,
+        "max_slippage": 0.02,
+        "markets": {
+            "weth_usdc": {
+                "address": "0x7aE97042a4A0eB4D1eB370C34F9736c7E0AF2EF0",
+                "collateral": "WETH",
+                "debt": "USDC",
+                "ltv": 0.85,
+                "fee": 0.0008
+            },
+            "weth_dai": {
+                "address": "0x6C7Fd4321183b542E61Cd519F28Cf5539B7394b4",
+                "collateral": "WETH",
+                "debt": "DAI",
+                "ltv": 0.85,
+                "fee": 0.0008
+            }
+        }
+    },
+    "maverick": {
+        "name": "Maverick",
+        "factory_address": "0x4DA6fe129D4c95D07a257E1B5eC98B44327c4099",
+        "router_address": "0x32AED3Bce901DA12ca8489788F3A99fCe1056e14",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "synthswap": {
+        "name": "SynthSwap",
+        "factory_address": "0x9e343Bea27a12B23523ad88333a1B0f68cc1F05E",
+        "router_address": "0x7C2c7E7bA4Df5101931bF49C5c2Eb4d9c59D9F0b",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "alienbase": {
+        "name": "AlienBase",
+        "factory_address": "0x3E84D913803b02A4a7f027165E8cA42C14C0FdE7",
+        "router_address": "0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    },
+    "velocore": {
+        "name": "Velocore",
+        "factory_address": "0x6c9a0D8B1c7a95a299e7Bdc6C0Bb2c8E357E4E41",
+        "router_address": "0x85E8262849Cd8479A3Cd0D1DaB5886D51E585E28",
+        "fee_tiers": [100, 500, 3000],
+        "min_liquidity_usd": 50000,
+        "max_slippage": 0.02
+    }
+} 

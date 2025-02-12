@@ -1,0 +1,112 @@
+groups:
+  - name: ml_metrics
+    rules:
+    # Model Performance Metrics
+    - record: model_prediction_accuracy
+      expr: |
+        sum(rate(prediction_correct_total[5m])) / 
+        sum(rate(prediction_total[5m]))
+
+    - record: model_inference_latency_avg
+      expr: |
+        rate(model_inference_duration_seconds_sum[5m]) / 
+        rate(model_inference_duration_seconds_count[5m])
+
+    # Training Metrics
+    - record: training_loss_rate
+      expr: rate(training_loss_total[5m])
+
+    - record: validation_metrics_rate
+      expr: |
+        rate(validation_metrics_total{metric=~"precision|recall|f1"}[5m])
+
+    # Resource Usage
+    - record: gpu_memory_utilization
+      expr: |
+        gpu_memory_used_bytes / 
+        gpu_memory_total_bytes * 100
+
+    - record: model_memory_usage
+      expr: process_resident_memory_bytes{job="ml-service"}
+
+    # Trading Performance
+    - record: prediction_success_rate
+      expr: |
+        sum(rate(trading_predictions_success_total[1h])) / 
+        sum(rate(trading_predictions_total[1h]))
+
+    - record: profit_by_model
+      expr: sum by (model_version) (trading_profit_total)
+
+    # Model Drift
+    - record: feature_drift_score
+      expr: |
+        abs(
+          rate(feature_values_sum[1h]) / rate(feature_values_count[1h]) -
+          avg_over_time(feature_values_sum[24h]) / avg_over_time(feature_values_count[24h])
+        )
+
+    # Alerts
+    - alert: HighModelLatency
+      expr: model_inference_latency_avg > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: High model inference latency
+        description: "Model inference latency is above 500ms for 5 minutes"
+
+    - alert: LowPredictionAccuracy
+      expr: model_prediction_accuracy < 0.7
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: Low prediction accuracy
+        description: "Model prediction accuracy has dropped below 70% for 15 minutes"
+
+    - alert: ModelDrift
+      expr: feature_drift_score > 0.3
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: Significant model drift detected
+        description: "Feature distributions have significantly changed"
+
+    - alert: HighErrorRate
+      expr: rate(model_errors_total[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: High model error rate
+        description: "Model error rate is above 10% for 5 minutes"
+
+    - alert: GPUMemoryNearCapacity
+      expr: gpu_memory_utilization > 90
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: GPU memory near capacity
+        description: "GPU memory utilization is above 90% for 5 minutes"
+
+    - alert: ModelRetrainingNeeded
+      expr: time() - last_model_training_timestamp > 86400
+      labels:
+        severity: warning
+      annotations:
+        summary: Model retraining needed
+        description: "Model has not been retrained in the last 24 hours"
+
+    - alert: NegativeProfitTrend
+      expr: |
+        sum(rate(trading_profit_total[6h])) < 0 and
+        sum(rate(trading_predictions_total[6h])) > 100
+      for: 1h
+      labels:
+        severity: critical
+      annotations:
+        summary: Negative profit trend detected
+        description: "Trading strategy showing consistent losses over 6 hours with significant volume" 

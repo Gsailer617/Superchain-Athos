@@ -42,6 +42,10 @@ class AnalyticsConfig:
     risk_free_rate: float = 0.0  # Risk-free rate for Sharpe ratio
     confidence_level: float = 0.95  # Confidence level for statistical tests
     update_interval: int = 60  # Seconds between analytics updates
+    profit_window: int = 24  # Hours
+    gas_efficiency_threshold: float = 0.8
+    min_success_rate: float = 0.7
+    enable_advanced_metrics: bool = True
 
 class DataAnalyzer:
     """
@@ -622,4 +626,54 @@ class DataAnalyzer:
             return metrics
         except Exception as e:
             logger.error("Error calculating opportunity metrics", error=str(e))
-            return {} 
+            return {}
+
+def calculate_metrics(
+    performance_data: pd.DataFrame,
+    config: Optional[AnalyticsConfig] = None
+) -> Dict[str, float]:
+    """Calculate performance metrics from data
+    
+    Args:
+        performance_data: DataFrame with columns [timestamp, profit, gas_used, success_rate]
+        config: Optional analytics configuration
+        
+    Returns:
+        Dictionary of calculated metrics
+    """
+    if config is None:
+        config = AnalyticsConfig()
+        
+    # Calculate basic metrics
+    metrics = {
+        'avg_profit': float(np.float64(performance_data['profit'].mean())),
+        'total_profit': float(np.float64(performance_data['profit'].sum())),
+        'success_rate': float(np.float64(performance_data['success_rate'].mean())),
+        'gas_efficiency': float(np.float64(
+            performance_data['profit'].sum() / 
+            performance_data['gas_used'].sum()
+            if performance_data['gas_used'].sum() > 0 else 0
+        ))
+    }
+    
+    # Add advanced metrics if enabled
+    if config.enable_advanced_metrics:
+        # Calculate volatility
+        metrics['profit_volatility'] = float(np.float64(performance_data['profit'].std()))
+        
+        # Calculate trend using numpy's polyfit
+        trend_coef = np.polyfit(
+            range(len(performance_data)), 
+            performance_data['profit'].values,
+            deg=1
+        )
+        metrics['profit_trend'] = float(np.float64(trend_coef[0]))
+        
+        # Calculate efficiency score
+        metrics['efficiency_score'] = float(np.float64(
+            metrics['success_rate'] * 
+            metrics['gas_efficiency'] * 
+            (1 - metrics['profit_volatility'])
+        ))
+    
+    return metrics 

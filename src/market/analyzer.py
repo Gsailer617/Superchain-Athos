@@ -9,6 +9,8 @@ import math
 from dataclasses import dataclass
 import sys
 from pathlib import Path
+from web3 import Web3
+from src.gas.optimizer import AsyncGasOptimizer
 
 # Add parent directory to Python path to resolve core imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -227,35 +229,65 @@ class DefiLlamaIntegration:
             return {}
 
 class MarketAnalyzer:
-    """Handles market analysis and opportunity detection"""
+    """Analyzes market conditions and opportunities"""
     
+    # Class constants
     VOLATILITY_THRESHOLD = 0.15  # 15% volatility threshold for warnings
     
-    def __init__(self):
-        # Original components
-        self.time_series = TimeSeriesFeatures()
-        self.cross_chain = CrossChainAnalyzer()
-        self.mev_protection = MEVProtection()
-        self.gas_optimizer = GasOptimizer()
-        self.token_economics = TokenEconomicsAnalyzer()
+    def __init__(self, web3: Optional[Web3] = None, config: Optional[Dict[str, Any]] = None):
+        """Initialize market analyzer
         
-        # Original tracking
-        self.volatility_history = []
-        self.price_history = {}
-        self.volume_history = {}
-        self.slippage_history = {}
-        
-        # Original configuration
-        self.history_window = 1000
-        self.volatility_window = 24
-        self.cleanup_interval = 3600
-        self.last_cleanup = time.time()
-        
-        # Original DeFi integrations
+        Args:
+            web3: Optional Web3 instance
+            config: Optional configuration dictionary
+        """
+        self.web3 = web3
+        self.config = config or {}
+        self.gas_optimizer = AsyncGasOptimizer(web3=web3, config=config)
         self.defillama = DefiLlamaIntegration()
+        
+        # Load configurations
         self.supported_dexes = self._load_dex_configs()
         self.protocol_slugs = self._load_protocol_slugs()
         
+    def _load_dex_configs(self) -> Dict[str, Any]:
+        """Load DEX configurations"""
+        try:
+            with open('config/dex_configs.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading DEX configs: {str(e)}")
+            return {}
+            
+    def _load_protocol_slugs(self) -> Dict[str, Any]:
+        """Load protocol slugs"""
+        try:
+            with open('config/protocol_slugs.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading protocol slugs: {str(e)}")
+            return {}
+        
+    async def analyze_market(self, token_pair: Tuple[str, str], amount: float) -> Dict[str, Any]:
+        """Analyze market conditions for a token pair"""
+        try:
+            # Get gas optimization
+            gas_params = {'urgency': 'normal'}  # Default to normal urgency
+            gas_settings = await self.gas_optimizer.optimize_gas_params(gas_params)
+            
+            # Get market data from DeFiLlama
+            market_data = await self.defillama.get_protocol_data(token_pair[0])
+            
+            return {
+                'gas_settings': gas_settings,
+                'market_data': market_data,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing market: {str(e)}")
+            return {}
+
     def monitor_volatility(self, market_data: MarketDataType) -> None:
         """Monitor market volatility and log warnings if exceeds thresholds"""
         try:
@@ -521,56 +553,6 @@ class MarketAnalyzer:
             reasons.append(f"Many pending transactions: {pending_tx}")
         return ", ".join(reasons)
 
-    async def analyze_market(
-        self,
-        token_pair: TokenPair,
-        amount: float
-    ) -> Dict[str, Any]:
-        """Comprehensive market analysis with all original capabilities"""
-        try:
-            # Time series analysis
-            time_series_features = self.time_series.get_features()
-            
-            # Cross-chain analysis
-            cross_chain_metrics = await self.cross_chain.analyze_opportunities(token_pair)
-            
-            # MEV risk analysis
-            mev_risk = self.mev_protection.calculate_mev_risk({
-                'amount': amount,
-                'token_pair': token_pair
-            })
-            
-            # Gas optimization
-            gas_strategy = self.gas_optimizer.optimize_execution({
-                'amount': amount,
-                'token_pair': token_pair
-            })
-            
-            # Token economics
-            token_metrics = self.token_economics.analyze_token_metrics(token_pair[0])
-            
-            # Market depth
-            market_depth = await self.calculate_market_depth(token_pair)
-            
-            # Protocol health
-            protocol_health = await self.analyze_protocol_health()
-            
-            # Combine all analyses
-            return {
-                'time_series': time_series_features,
-                'cross_chain': cross_chain_metrics,
-                'mev_risk': mev_risk,
-                'gas_strategy': gas_strategy,
-                'token_economics': token_metrics,
-                'market_depth': market_depth,
-                'protocol_health': protocol_health,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            logger.error(f"Error in market analysis: {str(e)}")
-            return {}
-            
     def update_market_state(
         self,
         token_pair: TokenPair,

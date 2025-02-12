@@ -58,6 +58,7 @@ class MarketMetricsType:
 class ExecutionStatus(Enum):
     """Execution status codes for arbitrage operations"""
     SUCCESS = auto()
+    PENDING = auto()  # Added for tracking in-progress executions
     INVALID_OPPORTUNITY = auto()
     MARKET_CONDITIONS_CHANGED = auto()
     EXECUTION_ERROR = auto()

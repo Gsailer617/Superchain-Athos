@@ -2,19 +2,23 @@
 import logging
 import aiohttp
 import json
-from typing import Dict, Optional, Any, TypeVar, Union, List
+from typing import Dict, Optional, Any, TypeVar, Union, List, cast
 from datetime import datetime
 from tenacity import retry, stop_after_attempt, wait_exponential
 import os
 from transformers import pipeline
 import torch
 from dataclasses import dataclass
+import asyncio
+import time
+from aiohttp import ClientTimeout
 
 T = TypeVar('T')
 PerformanceData = Dict[str, Union[int, float, str]]
 MarketData = Dict[str, Union[int, float, str]]
 TradingParams = Dict[str, Any]
 SentimentResponse = Dict[str, Union[str, float, datetime]]
+APIResponse = Union[List[Dict[str, Any]], Dict[str, Any]]
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +48,26 @@ class LLMInterface:
         self.opportunity_model = "facebook/bart-large-cnn"
         self.market_model = "bigscience/bloom"
         
-        # Initialize NLP capabilities
-        self.sentiment_analyzer = pipeline(
-            "sentiment-analysis",
-            model="finiteautomata/bertweet-base-sentiment-analysis"
-        )
+        # Enhanced error tracking
+        self.error_counts: Dict[str, int] = {}
+        self.last_error_time: Dict[str, float] = {}
+        self.error_threshold = 5  # Max errors before backing off
+        self.error_window = 300  # 5 minute window for error tracking
         
-        # Conversation management
+        # Initialize NLP capabilities with proper error handling
+        try:
+            self.sentiment_analyzer = pipeline(
+                "sentiment-analysis",
+                model="distilbert-base-uncased-finetuned-sst-2-english",
+                device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize sentiment analyzer: {e}")
+            self.sentiment_analyzer = None
+            
+        # Conversation management with TTL
         self.conversations: Dict[int, ConversationContext] = {}
+        self.conversation_ttl = 3600  # 1 hour
         
         # Intent classification categories
         self.intents = {
@@ -62,27 +78,114 @@ class LLMInterface:
             'help': ['help', 'guide', 'tutorial', 'commands', 'instructions']
         }
         
+    async def _make_api_request(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        error_context: str
+    ) -> APIResponse:
+        """
+        Make API request with enhanced error handling and rate limiting
+        
+        Args:
+            endpoint: API endpoint
+            payload: Request payload
+            error_context: Context for error tracking
+            
+        Returns:
+            API response
+            
+        Raises:
+            Exception: If API call fails after retries
+        """
+        # Check error threshold
+        current_time = time.time()
+        if error_context in self.error_counts:
+            # Reset error count if window has passed
+            if current_time - self.last_error_time[error_context] > self.error_window:
+                self.error_counts[error_context] = 0
+            # Check if threshold exceeded
+            elif self.error_counts[error_context] >= self.error_threshold:
+                wait_time = self.error_window - (current_time - self.last_error_time[error_context])
+                logger.warning(f"Error threshold exceeded for {error_context}. Backing off for {wait_time:.1f}s")
+                await asyncio.sleep(wait_time)
+                self.error_counts[error_context] = 0
+        
+        try:
+            timeout = ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{self.api_url}{endpoint}",
+                    headers=self.headers,
+                    json=payload
+                ) as response:
+                    if response.status != 200:
+                        error_msg = await response.text()
+                        logger.error(f"API error ({response.status}) for {error_context}: {error_msg}")
+                        raise Exception(f"API returned status {response.status}")
+                        
+                    result = await response.json()
+                    
+                    # Validate response format
+                    if not isinstance(result, (list, dict)):
+                        raise ValueError(f"Unexpected response format: {type(result)}")
+                        
+                    return cast(APIResponse, result)
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout during {error_context}")
+            self._track_error(error_context)
+            raise
+        except Exception as e:
+            logger.error(f"Error during {error_context}: {str(e)}", exc_info=True)
+            self._track_error(error_context)
+            raise
+
+    def _track_error(self, context: str) -> None:
+        """Track error occurrence for rate limiting"""
+        current_time = time.time()
+        if context not in self.error_counts:
+            self.error_counts[context] = 0
+            self.last_error_time[context] = current_time
+        self.error_counts[context] += 1
+        self.last_error_time[context] = current_time
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def generate_summary(self, performance_data: PerformanceData) -> str:
-        """Generate performance summary using BART"""
+        """Generate performance summary using BART with enhanced validation"""
         try:
             prompt = self._create_summary_prompt(performance_data)
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.api_url}{self.summary_model}",
-                    headers=self.headers,
-                    json={"inputs": prompt, "parameters": {"max_length": 150, "min_length": 50}}
-                ) as response:
-                    result = await response.json()
-                    
+            result = await self._make_api_request(
+                self.summary_model,
+                {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_length": 150,
+                        "min_length": 50,
+                        "do_sample": False  # Deterministic output
+                    }
+                },
+                "summary_generation"
+            )
+            
             if isinstance(result, list) and len(result) > 0:
-                return result[0]['summary_text']
-            return "Error generating summary"
+                summary = result[0].get('summary_text')
+                if not summary:
+                    raise ValueError("Empty summary received")
+                return summary
+                
+            raise ValueError(f"Unexpected response format: {result}")
             
         except Exception as e:
-            logger.error(f"Error generating summary: {e}")
-            return "Error generating summary"
+            logger.error(
+                "Error generating summary",
+                extra={
+                    "error": str(e),
+                    "performance_data": performance_data
+                }
+            )
+            return "I apologize, but I couldn't generate a summary at this time. Please try again later."
             
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def analyze_trading_suggestion(
@@ -117,29 +220,67 @@ class LLMInterface:
             
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def analyze_market_sentiment(self, market_data: MarketData) -> SentimentResponse:
-        """Analyze market sentiment and conditions"""
+        """Analyze market sentiment with enhanced validation and error handling"""
         try:
+            if not self.sentiment_analyzer:
+                raise RuntimeError("Sentiment analyzer not initialized")
+                
             prompt = self._create_market_prompt(market_data)
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.api_url}{self.analysis_model}",
-                    headers=self.headers,
-                    json={
-                        "inputs": prompt,
-                        "parameters": {
-                            "max_length": 150,
-                            "temperature": 0.3
-                        }
+            result = await self._make_api_request(
+                self.analysis_model,
+                {
+                    "inputs": prompt,
+                    "parameters": {
+                        "max_length": 150,
+                        "temperature": 0.3,
+                        "do_sample": True,
+                        "top_p": 0.9
                     }
-                ) as response:
-                    result = await response.json()
-                    
-            return self._parse_sentiment_response(result[0]['generated_text'])
+                },
+                "sentiment_analysis"
+            )
+            
+            # Validate and parse response
+            if not isinstance(result, list) or not result:
+                raise ValueError(f"Unexpected response format: {result}")
+                
+            first_result = result[0]
+            if not isinstance(first_result, dict):
+                raise ValueError("Invalid response format")
+                
+            sentiment_text = first_result.get('generated_text', '')
+            if not sentiment_text:
+                raise ValueError("Empty sentiment response")
+                
+            # Analyze sentiment
+            sentiment_scores = self.sentiment_analyzer([sentiment_text])
+            if not sentiment_scores:
+                raise ValueError("Failed to analyze sentiment")
+                
+            sentiment_score = sentiment_scores[0]
+            
+            return {
+                'sentiment': str(sentiment_score.get('label', 'neutral')),
+                'confidence': float(sentiment_score.get('score', 0.0)),
+                'timestamp': datetime.now(),
+                'market_context': market_data.get('context', 'unknown')
+            }
             
         except Exception as e:
-            logger.error(f"Error analyzing market sentiment: {e}")
-            return {'sentiment': 'neutral', 'confidence': 0.0, 'timestamp': datetime.now()}
+            logger.error(
+                "Error analyzing market sentiment",
+                extra={
+                    "error": str(e),
+                    "market_data": market_data
+                }
+            )
+            return {
+                'sentiment': 'neutral',
+                'confidence': 0.0,
+                'timestamp': datetime.now(),
+                'market_context': 'error'
+            }
             
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def analyze_opportunity(self, opportunity_data: Dict[str, Any]) -> str:
@@ -605,4 +746,14 @@ class LLMInterface:
             'volume_24h': 0,
             'trend': 'neutral',
             'opportunities': []
-        } 
+        }
+
+    def _cleanup_conversations(self) -> None:
+        """Clean up expired conversations"""
+        current_time = time.time()
+        expired = [
+            user_id for user_id, context in self.conversations.items()
+            if current_time - context.timestamp > self.conversation_ttl
+        ]
+        for user_id in expired:
+            del self.conversations[user_id] 

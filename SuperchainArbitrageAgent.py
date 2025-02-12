@@ -3,12 +3,12 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 from web3 import Web3
-from typing import List, Dict, Tuple, Optional, Union, Callable, Any, AsyncGenerator, Coroutine, TypeVar, Literal
+from typing import List, Dict, Tuple, Optional, Union, Callable, Any, AsyncGenerator, Coroutine, TypeVar, Literal, cast
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from eth_typing import Address, HexStr, ChecksumAddress
-from web3.contract import Contract
+from web3.contract.contract import Contract
 from web3.exceptions import ContractLogicError, TransactionNotFound
 import aiohttp
 import json
@@ -37,6 +37,19 @@ import math
 from typing import Literal
 from enum import Enum, auto
 from src.core.web3_config import get_web3, get_async_web3
+from src.core.types import ExecutionResult, ExecutionStatus, MarketValidationResult
+from src.ml.model import ArbitrageModel
+from src.utils.training_manager import TrainingManager
+from src.validation.transaction_validator import TransactionValidator
+from src.execution.transaction_builder import TransactionBuilder
+from src.execution.execution_engine import ExecutionEngine
+from src.gas.optimizer import AsyncGasOptimizer
+from src.gas.gas_manager import GasManager
+from src.validation.market_validator import MarketValidator
+from src.market.analyzer import MarketAnalyzer, DefiLlamaIntegration
+from threading import Lock
+from src.agent.token_discovery import TokenDiscovery
+from src.monitoring.monitor_manager import MonitorManager
 
 # Type Aliases
 TokenAddress = str
@@ -52,6 +65,26 @@ FlashLoanOpportunityType = Dict[str, Union[
     float,  # amount, provider_score, fees, profits
     FlashLoanProviderType,  # flash_loan_provider
     Dict[str, Any]  # provider_metrics
+]]
+
+# Neural network feature types
+SentimentFeature = torch.Tensor  # Shape: (batch_size, 8)
+HistoricalFeature = torch.Tensor  # Shape: (batch_size, 1, 8, 8)
+CrossChainFeature = torch.Tensor  # Shape: (batch_size, 12)
+MEVFeature = torch.Tensor  # Shape: (batch_size, 8)
+GasFeature = torch.Tensor  # Shape: (batch_size, 6)
+LiquidityFeature = torch.Tensor  # Shape: (batch_size, 10)
+TokenEconomicsFeature = torch.Tensor  # Shape: (batch_size, 12)
+
+# Neural network market data type
+MarketDataBatch = Dict[str, Union[
+    SentimentFeature,
+    HistoricalFeature,
+    CrossChainFeature,
+    MEVFeature,
+    GasFeature,
+    LiquidityFeature,
+    TokenEconomicsFeature
 ]]
 
 logging.basicConfig(
@@ -368,13 +401,13 @@ class ArbitrageNetwork(nn.Module):
             nn.Linear(32, 8)
         )
         
-    def forward(self, x, market_data=None):
+    def forward(self, x: torch.Tensor, market_data: Optional[MarketDataBatch] = None) -> torch.Tensor:
         """Forward pass with market data validation"""
         if market_data is None:
             raise ValueError("market_data is required for prediction")
             
         # Validate required features
-        required_features = {
+        required_shapes = {
             'sentiment': (8,),
             'historical': (1, 8, 8),
             'cross_chain': (12,),
@@ -384,11 +417,14 @@ class ArbitrageNetwork(nn.Module):
             'token_economics': (12,)
         }
         
-        for feature, expected_shape in required_features.items():
-            if feature not in market_data:
-                raise ValueError(f"Missing required feature: {feature}")
-            if market_data[feature].shape[-len(expected_shape):] != expected_shape:
-                raise ValueError(f"Invalid shape for {feature}: expected {expected_shape}, got {market_data[feature].shape}")
+        for feature_name, expected_shape in required_shapes.items():
+            if feature_name not in market_data:
+                raise ValueError(f"Missing required feature: {feature_name}")
+            feature_tensor = market_data[feature_name]
+            if not isinstance(feature_tensor, torch.Tensor):
+                raise ValueError(f"Feature {feature_name} must be a torch.Tensor")
+            if feature_tensor.shape[-len(expected_shape):] != expected_shape:
+                raise ValueError(f"Invalid shape for {feature_name}: expected {expected_shape}, got {feature_tensor.shape}")
         
         # Extract features from different components
         sentiment_features = self.sentiment_network(market_data['sentiment'])
@@ -429,72 +465,6 @@ class ArbitrageNetwork(nn.Module):
         
         return predictions
 
-class DefiLlamaIntegration:
-    def __init__(self):
-        self.client = DefiLlama()
-        self.cache_duration = 300  # 5 minutes cache
-        self.tvl_cache = {}
-        self.volume_cache = {}
-        
-    async def get_protocol_data(self, protocol_slug: str) -> Dict:
-        """Get comprehensive protocol data from DeFiLlama"""
-        try:
-            current_time = datetime.now().timestamp()
-            if (protocol_slug in self.tvl_cache and 
-                current_time - self.tvl_cache[protocol_slug]['timestamp'] < self.cache_duration):
-                return self.tvl_cache[protocol_slug]['data']
-            
-            protocol_data = await self.client.get_protocol(protocol_slug)
-            tvl_data = await self.client.get_protocol_tvl(protocol_slug)
-            
-            data = {
-                'tvl': protocol_data.get('tvl', 0),
-                'volume_24h': protocol_data.get('volume24h', 0),
-                'fees_24h': protocol_data.get('fees24h', 0),
-                'mcap_tvl': protocol_data.get('mcapTvl', 0),
-                'historical_tvl': tvl_data,
-                'timestamp': current_time
-            }
-            
-            self.tvl_cache[protocol_slug] = {
-                'data': data,
-                'timestamp': current_time
-            }
-            
-            return data
-            
-        except Exception as e:
-            logger.error(f"Error fetching DeFiLlama data for {protocol_slug}: {str(e)}")
-            return None
-            
-    async def get_pool_data(self, pool_address: str, chain: str = 'base') -> Dict:
-        """Get pool-specific data from DeFiLlama"""
-        try:
-            pool_data = await self.client.get_pool(pool_address, chain)
-            return {
-                'liquidity': pool_data.get('liquidity', 0),
-                'apy': pool_data.get('apy', 0),
-                'volume_24h': pool_data.get('volume24h', 0),
-                'fee_apy': pool_data.get('feeApy', 0)
-            }
-        except Exception as e:
-            logger.error(f"Error fetching pool data for {pool_address}: {str(e)}")
-            return None
-            
-    async def get_token_data(self, token_address: str, chain: str = 'base') -> Dict:
-        """Get token-specific data from DeFiLlama"""
-        try:
-            token_data = await self.client.get_token(token_address, chain)
-            return {
-                'price': token_data.get('price', 0),
-                'market_cap': token_data.get('marketCap', 0),
-                'volume_24h': token_data.get('volume24h', 0),
-                'liquidity': token_data.get('liquidity', 0)
-            }
-        except Exception as e:
-            logger.error(f"Error fetching token data: {str(e)}")
-            return None
-
 class RateLimiter:
     def __init__(self, calls_per_second: float = 1.0):
         self.calls_per_second = calls_per_second
@@ -510,46 +480,12 @@ class RateLimiter:
                 await asyncio.sleep(self.min_interval - time_since_last_call)
             self.last_call_time = time.time()
 
-class GasManager:
-    def __init__(self, web3: Web3):
-        self.web3 = web3
-        self.gas_price_history = []
-        self.max_history = 1000
-        self.update_interval = 10  # seconds
-        self.last_update = 0
-        
-    async def get_optimal_gas_price(self) -> int:
-        current_time = time.time()
-        if current_time - self.last_update > self.update_interval:
-            try:
-                base_fee = self.web3.eth.get_block('latest')['baseFeePerGas']
-                max_priority_fee = self.web3.eth.max_priority_fee
-                gas_price = base_fee + max_priority_fee
-                
-                self.gas_price_history.append({
-                    'timestamp': current_time,
-                    'price': gas_price
-                })
-                
-                if len(self.gas_price_history) > self.max_history:
-                    self.gas_price_history.pop(0)
-                    
-                self.last_update = current_time
-                
-            except Exception as e:
-                logger.error(f"Error updating gas price: {str(e)}")
-                if self.gas_price_history:
-                    gas_price = self.gas_price_history[-1]['price']
-                else:
-                    gas_price = self.web3.eth.gas_price
-                    
-        return gas_price
-
 class HuggingFaceInterface:
     """Interface for HuggingFace-based analysis and interaction"""
     
-    def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv('HF_API_KEY')
+    def __init__(self, api_key: Optional[str] = None):
+        """Initialize HuggingFace interface"""
+        self.api_key = api_key if api_key is not None else os.getenv('HF_API_KEY', '')
         self.api_url = "https://api-inference.huggingface.co/models/"
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
         self.summary_model = "facebook/bart-large-cnn"
@@ -570,7 +506,9 @@ class HuggingFaceInterface:
                     result = await response.json()
                     
             if isinstance(result, list) and len(result) > 0:
-                return result[0]['summary_text']
+                summary = result[0].get('summary_text', '')
+                if summary:
+                    return summary
             return "Error generating summary"
             
         except Exception as e:
@@ -643,16 +581,20 @@ class HuggingFaceInterface:
             return {}
 
 class FlashLoanArbitrageInterface:
+    """Interface for flash loan arbitrage operations"""
+    
     def __init__(self, web3: Web3, contract_address: str, private_key: str):
+        """Initialize flash loan interface"""
         self.web3 = web3
-        self.contract_address = contract_address
+        self.contract_address = Web3.to_checksum_address(contract_address)
         self.private_key = private_key
         self.contract = self.web3.eth.contract(
-            address=contract_address,
+            address=self.contract_address,
             abi=self._load_contract_abi()
         )
         
     def _load_contract_abi(self) -> List:
+        """Load flash loan contract ABI"""
         try:
             with open('abis/flash_loan_arbitrage.json', 'r') as f:
                 return json.load(f)
@@ -660,101 +602,472 @@ class FlashLoanArbitrageInterface:
             logger.error(f"Error loading flash loan ABI: {str(e)}")
             return []
 
-class MarketAnalyzer:
-    """Consolidated market analysis functionality"""
-    def __init__(self, window_size: int = 100):
-        self.window_size = window_size
-        self.price_history = []
-        self.volume_history = []
-        
-    @retry_async()
-    async def analyze_market(self, token_pair: Tuple[str, str], amount: float) -> Dict:
-        """Comprehensive market analysis"""
-        return {
-            'time_series': self._analyze_time_series(),
-            'cross_chain': await self._analyze_cross_chain(token_pair),
-            'mev_risk': await self._analyze_mev_risk(amount),
-            'gas': await self._optimize_gas(),
-            'economics': await self._analyze_token_economics(token_pair)
-        }
-        
-    def _analyze_time_series(self) -> Dict:
-        return {
-            'momentum': self._calculate_momentum(),
-            'rsi': self._calculate_relative_strength(),
-            'liquidity': self._calculate_liquidity_depth()
-        }
-        
-    async def _analyze_cross_chain(self, token_pair: Tuple[str, str]) -> Dict:
-        return {
-            'eth_correlation': self._calculate_eth_correlation(),
-            'l2_efficiency': self._calculate_l2_efficiency(),
-            'bridge_liquidity': await self._get_bridge_liquidity(),
-            'volume': await self._get_cross_chain_volume()
-        }
-        
-    async def _analyze_mev_risk(self, amount: float) -> Dict:
-        return {
-            'sandwich_risk': self._estimate_sandwich_risk({'amount': amount}),
-            'frontrunning_risk': self._estimate_frontrunning_risk({'amount': amount}),
-            'backrunning_risk': self._estimate_backrunning_risk({'amount': amount}),
-            'optimal_position': self._calculate_optimal_block_position({'amount': amount})
-        }
-        
-    async def _optimize_gas(self) -> Dict:
-        return {
-            'optimal_price': self._calculate_optimal_gas_price(),
-            'predicted_base_fee': self._predict_base_fee_next_blocks(),
-            'priority_fee': self._calculate_priority_fee(),
-            'block_space': self._analyze_block_space()
-        }
-        
-    async def _analyze_token_economics(self, token_pair: Tuple[str, str]) -> Dict:
-        return {
-            'supply_changes': self._analyze_supply_changes(token_pair[0]),
-            'holder_distribution': self._analyze_holder_distribution(token_pair[0]),
-            'vesting_events': self._track_vesting_events(token_pair[0]),
-            'protocol_revenue': self._analyze_protocol_revenue(token_pair[0])
-        }
+def thread_safe_cache(func):
+    """Thread-safe caching decorator"""
+    cache = TTLCache(maxsize=100, ttl=30)
+    lock = Lock()
+    
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        key = str(args) + str(kwargs)
+        with lock:
+            if key in cache:
+                return cache[key]
+            result = await func(*args, **kwargs)
+            cache[key] = result
+            return result
+    return wrapper
 
 class SuperchainArbitrageAgent:
     """Main arbitrage agent using composition of specialized components"""
     
     def __init__(self, config_path: str = 'config.json'):
-        """Initialize arbitrage agent with configuration"""
-        # Load configuration
+        """Initialize the arbitrage agent"""
         self.config_path = config_path
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.config = self._load_config()
         
-        # Get Web3 from centralized provider
+        # Constants
+        self.MIN_CONFIDENCE = 0.8  # 80% minimum confidence threshold
+        self.VOLATILITY_THRESHOLD = 0.1  # 10% volatility threshold
+        
+        # Initialize Web3
         self.web3 = get_web3()
-        logger.info("Using centralized Web3 provider")
+        self.async_web3 = get_async_web3()
         
-        # Initialize components using composition
-        self.market_analyzer = MarketAnalyzer()
-        self.model = ArbitrageModel(self.device)
-        self.training_manager = TrainingManager(self.model, self.device)
-        self.transaction_validator = TransactionValidator()
-        self.transaction_builder = TransactionBuilder(self.web3)
+        # Initialize token discovery
+        self.token_discovery = TokenDiscovery(self.config)
+        
+        # Initialize gas manager and market validator first
+        self.gas_manager = GasManager(self.web3, self.config)
+        self.market_validator = MarketValidator(self.web3, self.config)
+        
+        # Initialize components with config and dependencies
+        self.market_analyzer = MarketAnalyzer(config=self.config)
+        self.validator = TransactionValidator(web3=self.web3, config=self.config)
+        self.builder = TransactionBuilder(config=self.config)
         self.execution_engine = ExecutionEngine(
             web3=self.web3,
             gas_manager=self.gas_manager,
             market_validator=self.market_validator
         )
         
-        # Initialize monitoring
-        self.monitoring = {
-            'active_executions': 0,
-            'total_executions': 0,
-            'successful_executions': 0,
-            'failed_executions': 0,
-            'total_profit': 0.0,
-            'total_gas_used': 0
-        }
+        # Initialize monitoring and learning components
+        self.monitor_manager = MonitorManager(
+            config=self.config,
+            storage_path=self.config.get('monitoring', {}).get('storage_path', 'data/monitoring'),
+            prometheus_port=self.config.get('monitoring', {}).get('prometheus_port', 8000),
+            cache_enabled=self.config.get('monitoring', {}).get('cache_enabled', True)
+        )
+        
+        # Initialize neural network components
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = ArbitrageModel(self.device)
+        self.training_manager = TrainingManager(self.model, self.device)
+        
+        # Initialize time series features tracking
+        self.time_series = TimeSeriesFeatures(
+            window_size=self.config.get('learning', {}).get('window_size', 100),
+            cleanup_threshold=self.config.get('learning', {}).get('cleanup_threshold', 1000)
+        )
+        
+        # Initialize specialized analyzers
+        self.cross_chain = CrossChainAnalyzer()
+        self.mev_protection = MEVProtection()
+        self.gas_optimizer = GasOptimizer()
+        self.token_economics = TokenEconomicsAnalyzer()
+        
+        # Initialize HuggingFace interface for advanced analysis
+        self.hf_interface = HuggingFaceInterface(
+            api_key=self.config.get('huggingface', {}).get('api_key')
+        )
         
         # Thread safety
         self._execution_lock = asyncio.Lock()
         self.execution_semaphore = asyncio.Semaphore(3)
+        
+        # Initialize execution tracking
+        self.active_executions = 0
+        self.volatility_history: List[Tuple[float, float]] = []
+        
+        # Initialize token pairs and test amounts
+        self.token_pairs = self._load_initial_token_pairs()
+        self.test_amounts = self._load_test_amounts()
+        
+        # Initialize learning state
+        self.learning_state = {
+            'model_version': 0,
+            'total_training_steps': 0,
+            'performance_history': [],
+            'strategy_metrics': {},
+            'feature_importance': {},
+            'anomaly_scores': []
+        }
+
+    async def start(self):
+        """Start the arbitrage agent with all components"""
+        try:
+            # Start monitoring components
+            await self.monitor_manager.start()
+            
+            # Start market monitoring
+            monitoring_task = asyncio.create_task(self.monitor_superchain())
+            
+            # Start learning loop
+            learning_task = asyncio.create_task(self._learning_loop())
+            
+            # Start optimization loop
+            optimization_task = asyncio.create_task(self._optimization_loop())
+            
+            # Wait for all tasks
+            await asyncio.gather(
+                monitoring_task,
+                learning_task,
+                optimization_task
+            )
+            
+        except Exception as e:
+            logger.error(f"Error starting arbitrage agent: {str(e)}")
+            raise
+
+    async def _learning_loop(self):
+        """Main learning loop for continuous improvement"""
+        try:
+            while True:
+                # Get latest performance metrics
+                metrics = await self.monitor_manager.get_learning_insights()
+                
+                # Update learning state
+                self._update_learning_state(metrics)
+                
+                # Train model if enough data
+                if len(self.learning_state['performance_history']) >= 100:
+                    await self.train_model()
+                    
+                    # Generate and apply optimizations
+                    await self._apply_learning_optimizations()
+                    
+                    # Update feature importance
+                    feature_importance = self.model.get_feature_importance()
+                    self.monitor_manager.update_feature_importance(feature_importance)
+                    
+                    # Log learning progress
+                    logger.info(
+                        "Learning progress",
+                        model_version=self.learning_state['model_version'],
+                        training_steps=self.learning_state['total_training_steps']
+                    )
+                
+                await asyncio.sleep(300)  # Sleep for 5 minutes
+                
+        except asyncio.CancelledError:
+            logger.info("Learning loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in learning loop: {str(e)}")
+            raise
+
+    async def _optimization_loop(self):
+        """Continuous optimization loop"""
+        try:
+            while True:
+                # Get current insights
+                insights = await self.monitor_manager.get_learning_insights()
+                
+                # Apply optimizations based on insights
+                if insights.get('optimization_suggestions'):
+                    for suggestion in insights['optimization_suggestions']:
+                        await self._apply_optimization(suggestion)
+                
+                # Update strategies based on performance
+                await self._update_strategies()
+                
+                # Generate performance summary
+                summary = await self.hf_interface.generate_summary(self.learning_state)
+                logger.info(f"Performance summary: {summary}")
+                
+                await asyncio.sleep(600)  # Sleep for 10 minutes
+                
+        except asyncio.CancelledError:
+            logger.info("Optimization loop cancelled")
+        except Exception as e:
+            logger.error(f"Error in optimization loop: {str(e)}")
+            raise
+
+    def _update_learning_state(self, metrics: Dict[str, Any]):
+        """Update learning state with new metrics"""
+        try:
+            # Update performance history
+            self.learning_state['performance_history'].append({
+                'timestamp': datetime.now().isoformat(),
+                'metrics': metrics
+            })
+            
+            # Trim history if too long
+            max_history = self.config.get('learning', {}).get('max_history', 1000)
+            if len(self.learning_state['performance_history']) > max_history:
+                self.learning_state['performance_history'] = \
+                    self.learning_state['performance_history'][-max_history:]
+            
+            # Update strategy metrics
+            for strategy, perf in metrics.get('strategy_performance', {}).items():
+                if strategy not in self.learning_state['strategy_metrics']:
+                    self.learning_state['strategy_metrics'][strategy] = []
+                self.learning_state['strategy_metrics'][strategy].append(perf)
+            
+            # Update anomaly scores
+            self.learning_state['anomaly_scores'] = \
+                metrics.get('anomaly_scores', self.learning_state['anomaly_scores'])
+            
+            # Update feature importance
+            if 'feature_importance' in metrics:
+                self.learning_state['feature_importance'] = metrics['feature_importance']
+                
+        except Exception as e:
+            logger.error(f"Error updating learning state: {str(e)}")
+
+    async def _apply_learning_optimizations(self):
+        """Apply optimizations based on learning insights"""
+        try:
+            # Get current insights
+            insights = await self.monitor_manager.get_learning_insights()
+            
+            # Update model parameters based on performance
+            if insights.get('strategy_performance'):
+                await self._update_model_parameters(insights['strategy_performance'])
+            
+            # Adjust trading parameters
+            if insights.get('optimization_suggestions'):
+                await self._adjust_trading_parameters(insights['optimization_suggestions'])
+            
+            # Update feature selection
+            if insights.get('feature_importance'):
+                self._update_feature_selection(insights['feature_importance'])
+                
+        except Exception as e:
+            logger.error(f"Error applying learning optimizations: {str(e)}")
+
+    async def _update_model_parameters(self, performance: Dict[str, Any]):
+        """Update model parameters based on performance metrics"""
+        try:
+            # Calculate performance metrics
+            avg_profit = np.mean([p.get('profit', 0) for p in performance.values()])
+            success_rate = np.mean([p.get('success', 0) for p in performance.values()])
+            
+            # Adjust model parameters
+            if avg_profit < 0 or success_rate < 0.5:
+                # Increase learning rate for faster adaptation
+                self.model.adjust_learning_rate(factor=1.5)
+            else:
+                # Decrease learning rate for stability
+                self.model.adjust_learning_rate(factor=0.9)
+                
+            self.learning_state['model_version'] += 1
+            
+        except Exception as e:
+            logger.error(f"Error updating model parameters: {str(e)}")
+
+    async def _adjust_trading_parameters(self, suggestions: List[str]):
+        """Adjust trading parameters based on optimization suggestions"""
+        try:
+            for suggestion in suggestions:
+                if "gas" in suggestion.lower():
+                    # Adjust gas optimization parameters
+                    self.gas_manager.adjust_optimization_params()
+                elif "execution" in suggestion.lower():
+                    # Adjust execution parameters
+                    self.execution_engine.adjust_execution_params()
+                elif "strategy" in suggestion.lower():
+                    # Adjust strategy parameters
+                    await self._update_strategies()
+                    
+        except Exception as e:
+            logger.error(f"Error adjusting trading parameters: {str(e)}")
+
+    def _update_feature_selection(self, importance: Dict[str, float]):
+        """Update feature selection based on importance scores"""
+        try:
+            # Sort features by importance
+            sorted_features = sorted(
+                importance.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            
+            # Keep top features
+            top_features = sorted_features[:self.config.get('learning', {}).get('max_features', 20)]
+            
+            # Update model feature selection
+            self.model.update_feature_selection([f[0] for f in top_features])
+            
+        except Exception as e:
+            logger.error(f"Error updating feature selection: {str(e)}")
+
+    async def _update_strategies(self):
+        """Update trading strategies based on performance"""
+        try:
+            # Get strategy performance
+            strategy_metrics = self.learning_state['strategy_metrics']
+            
+            # Calculate strategy scores
+            strategy_scores = {}
+            for strategy, metrics in strategy_metrics.items():
+                if not metrics:
+                    continue
+                    
+                recent_metrics = metrics[-10:]  # Last 10 executions
+                avg_profit = np.mean([m.get('profit', 0) for m in recent_metrics])
+                success_rate = np.mean([m.get('success', 0) for m in recent_metrics])
+                
+                strategy_scores[strategy] = avg_profit * success_rate
+            
+            # Update strategy weights
+            total_score = sum(strategy_scores.values())
+            if total_score > 0:
+                for strategy, score in strategy_scores.items():
+                    weight = score / total_score
+                    await self._update_strategy_weight(strategy, weight)
+                    
+        except Exception as e:
+            logger.error(f"Error updating strategies: {str(e)}")
+
+    async def _update_strategy_weight(self, strategy: str, weight: float):
+        """Update individual strategy weight"""
+        try:
+            # Update strategy configuration
+            if 'strategies' not in self.config:
+                self.config['strategies'] = {}
+            if strategy not in self.config['strategies']:
+                self.config['strategies'][strategy] = {}
+                
+            self.config['strategies'][strategy]['weight'] = weight
+            
+            # Log update
+            logger.info(
+                f"Updated strategy weight",
+                strategy=strategy,
+                weight=weight
+            )
+            
+        except Exception as e:
+            logger.error(f"Error updating strategy weight: {str(e)}")
+
+    def _load_initial_token_pairs(self) -> List[TokenPair]:
+        """Load initial token pairs from config"""
+        pairs = self.config.get('trading', {}).get('token_pairs', [])
+        return [(pair['token0'], pair['token1']) for pair in pairs]
+        
+    async def _update_token_pairs(self) -> None:
+        """Update token pairs with discovered tokens"""
+        try:
+            # Get configured pairs
+            configured_pairs = self._load_initial_token_pairs()
+            
+            # Discover new tokens
+            discovered_tokens = await self.token_discovery.discover_new_tokens()
+            logger.info(f"Discovered {len(discovered_tokens)} new tokens")
+            
+            # Validate discovered tokens
+            valid_tokens = []
+            for token in discovered_tokens:
+                if await self.token_discovery.validate_token(token['address']):
+                    valid_tokens.append(token['address'])
+            
+            # Create all viable token pairs
+            discovered_pairs = []
+            weth_address = self.config['weth_address']
+            
+            # 1. Create pairs with WETH (important for liquidity)
+            discovered_pairs.extend([(weth_address, token) for token in valid_tokens])
+            
+            # 2. Create pairs between all valid tokens
+            for i, token1 in enumerate(valid_tokens):
+                for token2 in valid_tokens[i+1:]:  # Avoid duplicate pairs
+                    # Validate if this pair has enough liquidity
+                    if await self._validate_pair_liquidity((token1, token2)):
+                        discovered_pairs.append((token1, token2))
+            
+            # Combine configured and discovered pairs
+            all_pairs = configured_pairs + discovered_pairs
+            
+            # Log detailed statistics
+            logger.info(
+                f"Token pairs updated:\n"
+                f"- Configured pairs: {len(configured_pairs)}\n"
+                f"- WETH pairs: {len([p for p in discovered_pairs if weth_address in p])}\n"
+                f"- Non-WETH pairs: {len([p for p in discovered_pairs if weth_address not in p])}\n"
+                f"- Total pairs: {len(all_pairs)}"
+            )
+            
+            # Update token pairs
+            self.token_pairs = all_pairs
+            
+        except Exception as e:
+            logger.error(f"Error updating token pairs: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+    async def _validate_pair_liquidity(self, token_pair: TokenPair) -> bool:
+        """Validate if a token pair has sufficient liquidity"""
+        try:
+            # Get liquidity from market analyzer
+            liquidity = await self.market_analyzer.get_current_liquidity(token_pair)
+            min_liquidity = self.config.get('min_pair_liquidity', 10000)  # Default $10k
+            
+            if liquidity >= min_liquidity:
+                logger.debug(f"Pair {token_pair} has sufficient liquidity: ${liquidity:,.2f}")
+                return True
+            else:
+                logger.debug(f"Pair {token_pair} has insufficient liquidity: ${liquidity:,.2f} < ${min_liquidity:,.2f}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error validating pair liquidity for {token_pair}: {str(e)}")
+            return False
+        
+    def _load_test_amounts(self) -> List[float]:
+        """Load test amounts from config"""
+        return self.config.get('trading', {}).get('test_amounts', [0.1, 0.5, 1.0])
+        
+    async def _execute_with_retry(
+        self,
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType],
+        retry_count: int = 0
+    ) -> ExecutionResult:
+        """Execute transaction with retry logic"""
+        try:
+            tx_params = await self.builder.build_transaction(opportunity)
+            if not tx_params:
+                return ExecutionResult(
+                    status=ExecutionStatus.EXECUTION_ERROR,
+                    success=False,
+                    error_message="Failed to build transaction"
+                )
+            
+            return await self.execution_engine.execute_transaction(tx_params, retry_count)
+            
+        except Exception as e:
+            error_msg = f"Error executing transaction: {str(e)}"
+            logger.error(error_msg)
+            return ExecutionResult(
+                status=ExecutionStatus.EXECUTION_ERROR,
+                success=False,
+                error_message=error_msg
+            )
+            
+    async def record_failure(
+        self,
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType],
+        error_msg: str
+    ) -> None:
+        """Record execution failure"""
+        self.monitoring['failed_executions'] += 1
+        logger.error(f"Execution failed: {error_msg}")
+        
+    async def get_current_price(self, token_pair: TokenPair) -> float:
+        """Get current price for token pair"""
+        return await self.market_analyzer.get_current_price(token_pair)
+        
+    async def get_current_liquidity(self, token_pair: TokenPair) -> float:
+        """Get current liquidity for token pair"""
+        return await self.market_analyzer.get_current_liquidity(token_pair)
         
     async def analyze_opportunity(
         self,
@@ -762,48 +1075,71 @@ class SuperchainArbitrageAgent:
         amount: float,
         market_data: MarketDataType
     ) -> Optional[OpportunityType]:
-        """Analyze arbitrage opportunity using market analyzer and model"""
+        """Analyze arbitrage opportunity with enhanced validation"""
         try:
-            # Monitor market conditions
-            self.market_analyzer.monitor_volatility(market_data)
+            # Validate token pair format first
+            if not isinstance(token_pair, tuple) or len(token_pair) != 2:
+                raise KeyError('token_pair must be a tuple of two token addresses')
+            
+            # Then validate amount
+            if amount <= 0:
+                raise ValueError('amount must be positive')
+            
+            # Finally validate market data
+            if not market_data or not isinstance(market_data, dict):
+                raise KeyError('market_data is required and must be a dictionary')
             
             # Get market analysis with caching
             market_analysis = await self._cached_market_analysis(token_pair, amount)
+            if not market_analysis:
+                logger.warning("Market analysis returned None")
+                return None
             
             # Get model predictions with error handling
             predictions = await self._get_model_predictions(market_data)
-            if predictions is None:
+            if not predictions:
                 logger.warning("Model predictions returned None")
                 return None
-                
-            # Adjust confidence based on volatility
-            confidence = float(predictions['confidence'])
-            volatility_factor = self.market_analyzer.get_volatility_adjustment()
-            adjusted_confidence = confidence * volatility_factor
             
-            return {
+            # Calculate opportunity metrics
+            predicted_profit = predictions.get('profit', 0.0)
+            confidence = predictions.get('confidence', 0.0)
+            risk_score = predictions.get('risk_score', 1.0)
+            
+            if predicted_profit <= 0 or confidence < self.MIN_CONFIDENCE:
+                logger.debug(f"Opportunity rejected: profit={predicted_profit}, confidence={confidence}")
+                return None
+            
+            # Create opportunity
+            opportunity: OpportunityType = {
                 'token_pair': token_pair,
                 'amount': amount,
-                'predicted_profit': float(predictions['market_analysis'].mean()),
-                'confidence': adjusted_confidence,
-                'risk_score': float(predictions['risk_assessment'].mean()),
-                'execution_strategy': predictions['execution_strategy'].tolist(),
+                'predicted_profit': predicted_profit,
+                'confidence': confidence,
+                'risk_score': risk_score,
+                'execution_strategy': predictions.get('execution_strategy', []),
                 'market_analysis': market_analysis
             }
+            
+            return opportunity
             
         except Exception as e:
             logger.error(f"Error analyzing opportunity: {str(e)}")
             logger.error(traceback.format_exc())
-            return None
+            raise  # Re-raise to maintain error propagation
 
-    @cached(cache=TTLCache(maxsize=100, ttl=60))  # Cache for 60 seconds
+    @thread_safe_cache
     async def _cached_market_analysis(
         self,
         token_pair: TokenPair,
         amount: float
     ) -> Dict:
         """Cached market analysis to reduce RPC calls"""
-        return await self.market_analyzer.analyze_market(token_pair, amount)
+        try:
+            return await self.market_analyzer.analyze_market(token_pair, amount)
+        except Exception as e:
+            logger.error(f"Error in market analysis: {str(e)}")
+            return {}
 
     async def _get_model_predictions(
         self,
@@ -811,9 +1147,10 @@ class SuperchainArbitrageAgent:
     ) -> Optional[Dict]:
         """Get model predictions with error handling"""
         try:
-            with torch.no_grad():
-                predictions = self.model(market_data)
-            return predictions
+            async with self._execution_lock:  # Ensure thread-safe model access
+                with torch.no_grad():
+                    predictions = self.model(market_data)
+                return predictions
         except Exception as e:
             logger.error(f"Error getting model predictions: {str(e)}")
             return None
@@ -876,6 +1213,15 @@ class SuperchainArbitrageAgent:
                 error_message=error_msg
             )
 
+    def _safe_float_conversion(self, value: Any, default: float = 0.0) -> float:
+        """Safely convert a value to float"""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+            
     async def validate_market_conditions(
         self,
         opportunity: Union[OpportunityType, FlashLoanOpportunityType],
@@ -886,8 +1232,9 @@ class SuperchainArbitrageAgent:
         """Validate current market conditions before execution with enhanced checks"""
         try:
             # Get current price with caching
-            current_price = await self._get_cached_price(opportunity['token_pair'])
-            entry_price = opportunity.get('entry_price', current_price)
+            token_pair = cast(TokenPair, opportunity['token_pair'])
+            current_price = await self._get_cached_price(token_pair)
+            entry_price = self._safe_float_conversion(opportunity.get('entry_price'), current_price)
             price_change = abs(current_price - entry_price) / entry_price
             
             if price_change > max_price_movement:
@@ -899,8 +1246,11 @@ class SuperchainArbitrageAgent:
                 )
             
             # Check liquidity with caching
-            current_liquidity = await self._get_cached_liquidity(opportunity['token_pair'])
-            min_required_liquidity = opportunity.get('min_required_liquidity', current_liquidity * min_liquidity_ratio)
+            current_liquidity = await self._get_cached_liquidity(token_pair)
+            min_required_liquidity = self._safe_float_conversion(
+                opportunity.get('min_required_liquidity'),
+                current_liquidity * min_liquidity_ratio
+            )
             
             if current_liquidity < min_required_liquidity:
                 return MarketValidationResult(
@@ -911,7 +1261,7 @@ class SuperchainArbitrageAgent:
             
             # Check gas price with caching
             current_gas = await self._get_cached_gas_price()
-            original_gas = opportunity.get('gas_price', current_gas)
+            original_gas = self._safe_float_conversion(opportunity.get('gas_price'), current_gas)
             
             if current_gas > original_gas * max_gas_increase:
                 return MarketValidationResult(
@@ -973,19 +1323,42 @@ class SuperchainArbitrageAgent:
     @cached(cache=TTLCache(maxsize=1, ttl=5))  # Short cache for gas price
     async def _get_cached_gas_price(self) -> int:
         """Get cached gas price"""
-        return await self.gas_manager.get_optimal_gas_price()
+        try:
+            gas_settings = await self.gas_manager.optimize_gas_settings({})
+            gas_price = gas_settings.get('maxFeePerGas')
+            if gas_price is None:
+                gas_price = self.web3.eth.gas_price
+            return int(gas_price)
+        except Exception as e:
+            logger.error(f"Error getting gas price: {str(e)}")
+            return int(self.web3.eth.gas_price)
 
     async def _check_network_status(self) -> Dict[str, Any]:
         """Check network health status"""
         try:
-            # Get latest block with timeout
-            latest_block = await asyncio.wait_for(
-                self.web3.eth.get_block('latest'),
-                timeout=5.0
-            )
+            # Get latest block
+            try:
+                latest_block = self.web3.eth.get_block('latest')
+            except Exception as e:
+                logger.error(f"Failed to get latest block: {str(e)}")
+                return {
+                    'is_healthy': False,
+                    'reason': "Failed to get latest block"
+                }
+            
+            if not latest_block:
+                return {
+                    'is_healthy': False,
+                    'reason': "No latest block returned"
+                }
             
             # Check block timestamp
-            block_delay = time.time() - latest_block['timestamp']
+            try:
+                block_timestamp = int(latest_block.get('timestamp', 0))
+            except (ValueError, TypeError, AttributeError):
+                block_timestamp = 0
+                
+            block_delay = time.time() - block_timestamp
             if block_delay > 60:  # More than 1 minute delay
                 return {
                     'is_healthy': False,
@@ -993,16 +1366,26 @@ class SuperchainArbitrageAgent:
                 }
             
             # Check pending transactions
-            pending_tx_count = await self.web3.eth.get_block_transaction_count('pending')
+            try:
+                pending_tx_count = self.web3.eth.get_block_transaction_count('pending')
+            except Exception:
+                pending_tx_count = 0
+                
             if pending_tx_count > 10000:  # High pending tx count
                 return {
                     'is_healthy': False,
-                    'reason': f"High pending transactions: {pending_tx_count}"
+                    'reason': f"High pending transaction count: {pending_tx_count}"
                 }
+            
+            # Get block number
+            try:
+                block_number = int(latest_block.get('number', 0))
+            except (ValueError, TypeError, AttributeError):
+                block_number = 0
             
             return {
                 'is_healthy': True,
-                'block_number': latest_block['number'],
+                'block_number': block_number,
                 'block_delay': block_delay,
                 'pending_tx_count': pending_tx_count
             }
@@ -1028,33 +1411,243 @@ class SuperchainArbitrageAgent:
         # Emit metrics for monitoring
         logger.info(f"Execution metrics updated: {json.dumps(self.monitoring)}")
 
-    async def train_model(self):
+    async def train_model(self) -> None:
         """Train model using training manager"""
-        return await self.training_manager.train_step(
-            self.training_manager.get_training_batch()
-        )
-        
-    async def monitor_superchain(self) -> None:
-        """Monitor blockchain for opportunities"""
+        batch = self.training_manager.get_training_batch()
+        if batch is not None:
+            await self.training_manager.train_step(batch)
+            
+    async def _apply_optimization(self, suggestion: str) -> None:
+        """Apply optimization based on suggestion"""
         try:
+            if 'gas' in suggestion.lower():
+                await self._optimize_gas_settings()
+            elif 'execution' in suggestion.lower():
+                await self._optimize_execution_settings()
+            elif 'strategy' in suggestion.lower():
+                await self._optimize_strategy_settings()
+            elif 'liquidity' in suggestion.lower():
+                await self._optimize_liquidity_settings()
+                
+        except Exception as e:
+            logger.error(f"Error applying optimization: {str(e)}")
+
+    async def _optimize_gas_settings(self) -> None:
+        """Optimize gas-related settings"""
+        try:
+            # Get current gas metrics
+            gas_metrics = await self.monitor_manager.get_gas_metrics()
+            
+            # Calculate optimal gas settings
+            optimal_settings = self.gas_manager.calculate_optimal_settings(gas_metrics)
+            
+            # Update gas manager settings
+            await self.gas_manager.update_settings(optimal_settings)
+            
+            logger.info("Updated gas optimization settings", settings=optimal_settings)
+            
+        except Exception as e:
+            logger.error(f"Error optimizing gas settings: {str(e)}")
+
+    async def _optimize_execution_settings(self) -> None:
+        """Optimize execution-related settings"""
+        try:
+            # Get execution metrics
+            execution_metrics = await self.monitor_manager.get_execution_metrics()
+            
+            # Calculate optimal settings
+            optimal_settings = self.execution_engine.calculate_optimal_settings(execution_metrics)
+            
+            # Update execution engine settings
+            await self.execution_engine.update_settings(optimal_settings)
+            
+            logger.info("Updated execution optimization settings", settings=optimal_settings)
+            
+        except Exception as e:
+            logger.error(f"Error optimizing execution settings: {str(e)}")
+
+    async def _optimize_strategy_settings(self) -> None:
+        """Optimize strategy-related settings"""
+        try:
+            # Get strategy metrics
+            strategy_metrics = await self.monitor_manager.get_strategy_metrics()
+            
+            # Calculate optimal settings
+            optimal_settings = self.model.calculate_optimal_settings(strategy_metrics)
+            
+            # Update model settings
+            self.model.update_settings(optimal_settings)
+            
+            logger.info("Updated strategy optimization settings", settings=optimal_settings)
+            
+        except Exception as e:
+            logger.error(f"Error optimizing strategy settings: {str(e)}")
+
+    async def _optimize_liquidity_settings(self) -> None:
+        """Optimize liquidity-related settings"""
+        try:
+            # Get liquidity metrics
+            liquidity_metrics = await self.monitor_manager.get_liquidity_metrics()
+            
+            # Calculate optimal settings
+            optimal_settings = self.market_analyzer.calculate_optimal_settings(liquidity_metrics)
+            
+            # Update market analyzer settings
+            await self.market_analyzer.update_settings(optimal_settings)
+            
+            logger.info("Updated liquidity optimization settings", settings=optimal_settings)
+            
+        except Exception as e:
+            logger.error(f"Error optimizing liquidity settings: {str(e)}")
+
+    async def _check_circuit_breakers(self) -> bool:
+        """Check if any circuit breakers should be triggered"""
+        try:
+            # Get current metrics
+            metrics = await self.monitor_manager.get_learning_insights()
+            
+            # Check for anomalies
+            if len(metrics.get('anomaly_scores', [])) > 0:
+                recent_anomalies = metrics['anomaly_scores'][-10:]  # Last 10 scores
+                if sum(1 for score in recent_anomalies if score == -1) >= 3:
+                    logger.warning("Circuit breaker triggered: Too many recent anomalies")
+                    return True
+            
+            # Check performance degradation
+            if metrics.get('strategy_performance'):
+                recent_performance = []
+                for strategy in metrics['strategy_performance'].values():
+                    if isinstance(strategy, list) and len(strategy) >= 10:
+                        recent_metrics = strategy[-10:]  # Last 10 trades
+                        avg_profit = sum(m.get('profit', 0) for m in recent_metrics) / len(recent_metrics)
+                        recent_performance.append(avg_profit)
+                
+                if recent_performance and sum(1 for p in recent_performance if p < 0) > len(recent_performance) * 0.5:
+                    logger.warning("Circuit breaker triggered: Performance degradation")
+                    return True
+            
+            # Check gas costs
+            gas_metrics = await self.monitor_manager.get_gas_metrics()
+            if gas_metrics.get('average_cost', 0) > self.config.get('max_gas_cost', 1000000):
+                logger.warning("Circuit breaker triggered: Excessive gas costs")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking circuit breakers: {str(e)}")
+            return True  # Fail-safe: trigger circuit breaker on error
+
+    async def _handle_circuit_breaker(self) -> None:
+        """Handle circuit breaker activation"""
+        try:
+            logger.warning("Circuit breaker activated - pausing operations")
+            
+            # Stop active executions
+            self.active_executions = 0
+            
+            # Reset volatile state
+            self.volatility_history.clear()
+            
+            # Notify monitoring
+            await self.monitor_manager.record_circuit_breaker()
+            
+            # Wait for recovery period
+            await asyncio.sleep(self.config.get('circuit_breaker_cooldown', 300))  # 5 minutes default
+            
+            # Check if safe to resume
+            if await self._check_recovery_conditions():
+                logger.info("Circuit breaker reset - resuming operations")
+            else:
+                logger.warning("Recovery conditions not met - maintaining circuit breaker")
+                
+        except Exception as e:
+            logger.error(f"Error handling circuit breaker: {str(e)}")
+
+    async def _check_recovery_conditions(self) -> bool:
+        """Check if conditions are safe for recovery"""
+        try:
+            # Get current metrics
+            metrics = await self.monitor_manager.get_learning_insights()
+            
+            # Check market conditions
+            market_validation = await self.market_validator.validate_market_conditions({})
+            if not market_validation.is_valid:
+                return False
+            
+            # Check gas prices
+            gas_metrics = await self.monitor_manager.get_gas_metrics()
+            if gas_metrics.get('average_cost', 0) > self.config.get('max_gas_cost', 1000000):
+                return False
+            
+            # Check recent performance
+            if metrics.get('strategy_performance'):
+                recent_performance = []
+                for strategy in metrics['strategy_performance'].values():
+                    if isinstance(strategy, list) and len(strategy) >= 5:
+                        recent_metrics = strategy[-5:]  # Last 5 trades
+                        avg_profit = sum(m.get('profit', 0) for m in recent_metrics) / len(recent_metrics)
+                        recent_performance.append(avg_profit)
+                
+                if recent_performance and sum(1 for p in recent_performance if p < 0) > 0:
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error checking recovery conditions: {str(e)}")
+            return False
+
+    async def monitor_superchain(self) -> None:
+        """Monitor blockchain for opportunities with enhanced safety"""
+        try:
+            last_discovery_time = 0
+            discovery_interval = 300  # 5 minutes
+            
             while True:
-                # Fetch market data
-                market_data = await self.market_analyzer.fetch_market_data()
-                
-                # Process opportunities
-                opportunities = await self._process_opportunities(market_data)
-                
-                # Execute profitable opportunities
-                for opportunity in opportunities:
-                    if await self.validate_and_execute_opportunity(opportunity):
-                        break
-                        
-                await asyncio.sleep(1)  # Rate limiting
-                
+                try:
+                    # Check circuit breakers
+                    if await self._check_circuit_breakers():
+                        await self._handle_circuit_breaker()
+                        continue
+                    
+                    current_time = time.time()
+                    
+                    # Update token pairs periodically
+                    if current_time - last_discovery_time > discovery_interval:
+                        await self._update_token_pairs()
+                        last_discovery_time = current_time
+                        logger.info(f"Token pairs updated. Now tracking {len(self.token_pairs)} pairs")
+                    
+                    # Fetch market data
+                    market_data = await self.market_analyzer.fetch_market_data()
+                    
+                    # Process opportunities with enhanced monitoring
+                    opportunities = await self._process_opportunities(market_data)
+                    
+                    # Record monitoring metrics
+                    await self.monitor_manager.record_monitoring_cycle({
+                        'opportunities_found': len(opportunities),
+                        'token_pairs_tracked': len(self.token_pairs),
+                        'market_conditions': market_data.get('market_conditions', {}),
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
+                    # Execute profitable opportunities
+                    for opportunity in opportunities:
+                        if await self.validate_and_execute_opportunity(opportunity):
+                            break
+                            
+                    await asyncio.sleep(1)  # Rate limiting
+                    
+                except Exception as e:
+                    logger.error(f"Error in monitoring loop: {str(e)}")
+                    await asyncio.sleep(5)  # Back off on error
+                    
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
         except Exception as e:
-            logger.error(f"Error in monitoring loop: {str(e)}")
+            logger.error(f"Fatal error in monitoring loop: {str(e)}")
             raise
 
     async def validate_and_execute_opportunity(
@@ -1063,8 +1656,8 @@ class SuperchainArbitrageAgent:
     ) -> bool:
         """Validate and execute opportunity"""
         # Validate opportunity
-        if not self.transaction_validator.validate_opportunity(opportunity):
-                return False
+        if not await self.validator.validate_transaction(opportunity):
+            return False
                 
         # Execute if valid
         result = await self.execute_arbitrage(opportunity)
@@ -1084,40 +1677,22 @@ class SuperchainArbitrageAgent:
                     amount,
                     market_data
                 )
-                if opportunity and opportunity['predicted_profit'] > 0:
-                    opportunities.append(opportunity)
+                if opportunity is not None:
+                    predicted_profit = self._safe_float_conversion(opportunity.get('predicted_profit'))
+                    if predicted_profit > 0:
+                        opportunities.append(opportunity)
                     
         return sorted(
             opportunities,
-            key=lambda x: x['predicted_profit'],
+            key=lambda x: self._safe_float_conversion(x.get('predicted_profit')),
             reverse=True
         )
-        
-class ExecutionStatus(Enum):
-    """Execution status codes for arbitrage operations"""
-    SUCCESS = auto()
-    INVALID_OPPORTUNITY = auto()
-    MARKET_CONDITIONS_CHANGED = auto()
-    EXECUTION_ERROR = auto()
-    NETWORK_ERROR = auto()
 
-@dataclass
-class ExecutionResult:
-    """Result of an arbitrage execution attempt"""
-    status: ExecutionStatus
-    success: bool
-    error_message: Optional[str] = None
-    gas_used: Optional[int] = None
-    execution_time: Optional[float] = None
-    tx_hash: Optional[str] = None
-
-@dataclass
-class MarketValidationResult:
-    """Result of market condition validation"""
-    is_valid: bool
-    reason: Optional[str] = None
-    current_price: Optional[float] = None
-    price_change: Optional[float] = None
-    current_liquidity: Optional[float] = None
-    current_gas: Optional[int] = None
-    network_status: Optional[Dict[str, Any]] = None
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration from file"""
+        try:
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading config: {str(e)}")
+            raise ConfigurationError(f"Failed to load config: {str(e)}")

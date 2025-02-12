@@ -1,27 +1,209 @@
+version: '3.8'
+
 services:
   flash-loan-bot:
-    build: .
+    build:
+      context: .
+      target: production
     volumes:
-      - .:/app
-      - /app/node_modules
-      - /app/.venv
+      - ./data:/app/data
+      - ./logs:/app/logs
     env_file:
       - .env
     ports:
       - "8050:8050"  # For Dash/visualization
-    command: python telegram_bot.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8050/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
     restart: unless-stopped
+    networks:
+      - app-network
+      - monitoring-network
 
   visualization:
-    build: .
+    build:
+      context: .
+      target: production
     volumes:
-      - .:/app
-      - /app/node_modules
-      - /app/.venv
+      - ./data:/app/data
+      - ./logs:/app/logs
     env_file:
       - .env
     ports:
       - "8051:8051"  # For additional visualization services
     command: python visualization/realtime.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8051/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 2G
     depends_on:
-      - flash-loan-bot 
+      - flash-loan-bot
+    networks:
+      - app-network
+      - monitoring-network
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./config/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - monitoring-network
+
+  grafana:
+    image: grafana/grafana:latest
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - monitoring-network
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    volumes:
+      - ./config/alertmanager:/etc/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    ports:
+      - "9093:9093"
+    restart: unless-stopped
+    networks:
+      - monitoring-network
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14250:14250"
+      - "14268:14268"
+      - "14269:14269"
+      - "9411:9411"
+    restart: unless-stopped
+    networks:
+      - monitoring-network
+
+  redis:
+    image: redis:alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - app-network
+      - monitoring-network
+
+  sentry:
+    image: getsentry/sentry:latest
+    environment:
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_POSTGRES_HOST: sentry-postgres
+      SENTRY_DB_USER: sentry
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_REDIS_HOST: sentry-redis
+    ports:
+      - "9000:9000"
+    depends_on:
+      - sentry-postgres
+      - sentry-redis
+    networks:
+      - monitoring-network
+
+  sentry-postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: sentry
+      POSTGRES_PASSWORD: ${SENTRY_DB_PASSWORD}
+      POSTGRES_DB: sentry
+    volumes:
+      - sentry_postgres_data:/var/lib/postgresql/data
+    networks:
+      - monitoring-network
+
+  sentry-redis:
+    image: redis:alpine
+    volumes:
+      - sentry_redis_data:/data
+    networks:
+      - monitoring-network
+
+  sentry-cron:
+    image: getsentry/sentry:latest
+    command: run cron
+    environment:
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_POSTGRES_HOST: sentry-postgres
+      SENTRY_DB_USER: sentry
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_REDIS_HOST: sentry-redis
+    depends_on:
+      - sentry-postgres
+      - sentry-redis
+    networks:
+      - monitoring-network
+
+  sentry-worker:
+    image: getsentry/sentry:latest
+    command: run worker
+    environment:
+      SENTRY_SECRET_KEY: ${SENTRY_SECRET_KEY}
+      SENTRY_POSTGRES_HOST: sentry-postgres
+      SENTRY_DB_USER: sentry
+      SENTRY_DB_PASSWORD: ${SENTRY_DB_PASSWORD}
+      SENTRY_REDIS_HOST: sentry-redis
+    depends_on:
+      - sentry-postgres
+      - sentry-redis
+    networks:
+      - monitoring-network
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  redis_data:
+  sentry_postgres_data:
+  sentry_redis_data:
+
+networks:
+  app-network:
+    driver: bridge
+  monitoring-network:
+    driver: bridge 

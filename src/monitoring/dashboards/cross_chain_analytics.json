@@ -1,0 +1,261 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "title": "Bridge Analytics",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Bridge TVL",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "bridge_tvl{bridge=~'$bridge'}",
+              "refId": "A",
+              "legendFormat": "{{bridge}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD"
+            }
+          }
+        },
+        {
+          "title": "Bridge Transaction Volume",
+          "type": "bargauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (bridge) (increase(bridge_transaction_volume_total{bridge=~'$bridge'}[24h]))",
+              "refId": "A",
+              "legendFormat": "{{bridge}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Cross-Chain Opportunities",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Price Discrepancies",
+          "type": "heatmap",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "abs(chain_token_price{chain=~'$chain'} - on(token) group_right chain_token_price{chain='ethereum'}) / chain_token_price{chain='ethereum'} * 100",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            }
+          }
+        },
+        {
+          "title": "Arbitrage Opportunities",
+          "type": "table",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "cross_chain_arbitrage_opportunities{profit_percent>1}",
+              "refId": "A",
+              "format": "table",
+              "instant": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Chain Performance",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Gas Prices by Chain",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "chain_gas_price_gwei{chain=~'$chain'}",
+              "refId": "A",
+              "legendFormat": "{{chain}}"
+            }
+          ]
+        },
+        {
+          "title": "Transaction Finality",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "avg by (chain) (chain_block_finality_seconds{chain=~'$chain'})",
+              "refId": "A",
+              "legendFormat": "{{chain}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Liquidity Analysis",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Liquidity Distribution",
+          "type": "piechart",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (chain) (chain_total_liquidity_usd{chain=~'$chain'})",
+              "refId": "A",
+              "legendFormat": "{{chain}}"
+            }
+          ]
+        },
+        {
+          "title": "Liquidity Depth by Token",
+          "type": "bargauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (token) (chain_token_liquidity_usd{chain=~'$chain'})",
+              "refId": "A",
+              "legendFormat": "{{token}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Network Health",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Network TPS",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "rate(chain_transactions_total{chain=~'$chain'}[5m])",
+              "refId": "A",
+              "legendFormat": "{{chain}} TPS"
+            }
+          ]
+        },
+        {
+          "title": "Network Reliability",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "avg_over_time(chain_network_uptime_ratio{chain=~'$chain'}[1h])",
+              "refId": "A",
+              "legendFormat": "{{chain}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 1,
+              "unit": "percentunit"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "title": "Bridge Security",
+      "type": "row",
+      "collapsed": false,
+      "panels": [
+        {
+          "title": "Bridge Security Score",
+          "type": "gauge",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "bridge_security_score{bridge=~'$bridge'}",
+              "refId": "A",
+              "legendFormat": "{{bridge}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "value": null, "color": "red" },
+                  { "value": 70, "color": "yellow" },
+                  { "value": 90, "color": "green" }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "title": "Bridge Incidents",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "increase(bridge_security_incidents_total{bridge=~'$bridge'}[24h])",
+              "refId": "A",
+              "legendFormat": "{{bridge}} - {{severity}}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["cross-chain", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "name": "chain",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(chain_gas_price_gwei, chain)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      },
+      {
+        "name": "bridge",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(bridge_tvl, bridge)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Cross-Chain Analytics Dashboard",
+  "version": 1
+} 

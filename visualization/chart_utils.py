@@ -21,12 +21,17 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class ChartTheme:
-    """Configuration for chart theming"""
-    template: str
-    color_scheme: List[str]
-    font_family: str = "Arial"
-    title_font_size: int = 24
-    axis_font_size: int = 14
+    """Theme configuration for charts"""
+    background_color: str = '#FFFFFF'
+    plot_background_color: str = '#F8F9FA'
+    font_family: str = 'Arial, sans-serif'
+    primary_color: str = '#2C3E50'
+    secondary_color: str = '#E74C3C'
+    accent_color: str = '#3498DB'
+    success_color: str = '#2ECC71'
+    warning_color: str = '#F1C40F'
+    error_color: str = '#E74C3C'
+    grid_color: str = '#ECF0F1'
     
     @classmethod
     def get_light(cls) -> 'ChartTheme':
@@ -80,7 +85,7 @@ class InteractiveChartGenerator:
     
     def __init__(self, theme: Optional[ChartTheme] = None):
         """Initialize chart generator with theme"""
-        self.theme = theme or ChartTheme.get_light()
+        self.theme = theme or ChartTheme()
         self._setup_cache()
     
     def _setup_cache(self) -> None:
@@ -101,6 +106,193 @@ class InteractiveChartGenerator:
     def _cache_figure(self, cache_key: str, figure: go.Figure) -> None:
         """Cache figure with timestamp"""
         self.cache[cache_key] = (datetime.now(), figure)
+    
+    def create_time_series(
+        self,
+        data: pd.DataFrame,
+        x_column: str,
+        y_columns: List[str],
+        title: str,
+        y_axis_titles: Optional[List[str]] = None
+    ) -> go.Figure:
+        """Create an interactive time series chart
+        
+        Args:
+            data: DataFrame containing time series data
+            x_column: Column name for x-axis (typically timestamp)
+            y_columns: List of column names for y-axes
+            title: Chart title
+            y_axis_titles: Optional list of y-axis titles
+            
+        Returns:
+            Plotly figure object
+        """
+        fig = go.Figure()
+        
+        # Add traces for each y-column
+        for i, y_col in enumerate(y_columns):
+            fig.add_trace(
+                go.Scatter(
+                    x=data[x_column],
+                    y=data[y_col],
+                    name=y_col.replace('_', ' ').title(),
+                    line=dict(
+                        color=self._get_color(i),
+                        width=2
+                    ),
+                    yaxis=f'y{i+1}' if i > 0 else 'y'
+                )
+            )
+        
+        # Update layout with theme
+        layout_updates = {
+            'title': title,
+            'plot_bgcolor': self.theme.plot_background_color,
+            'paper_bgcolor': self.theme.background_color,
+            'font': dict(family=self.theme.font_family),
+            'xaxis': dict(
+                title=x_column.replace('_', ' ').title(),
+                gridcolor=self.theme.grid_color,
+                showgrid=True
+            ),
+            'showlegend': True,
+            'hovermode': 'x unified'
+        }
+        
+        # Add y-axes
+        for i, y_col in enumerate(y_columns):
+            axis_name = 'yaxis' if i == 0 else f'yaxis{i+1}'
+            layout_updates[axis_name] = dict(
+                title=y_axis_titles[i] if y_axis_titles else y_col.replace('_', ' ').title(),
+                gridcolor=self.theme.grid_color,
+                showgrid=True,
+                side='left' if i == 0 else 'right',
+                overlaying='y' if i > 0 else None
+            )
+            
+        fig.update_layout(**layout_updates)
+        return fig
+        
+    def create_scatter_plot(
+        self,
+        data: pd.DataFrame,
+        x_column: str,
+        y_column: str,
+        color_column: Optional[str] = None,
+        size_column: Optional[str] = None,
+        title: str = ''
+    ) -> go.Figure:
+        """Create an interactive scatter plot"""
+        fig = px.scatter(
+            data,
+            x=x_column,
+            y=y_column,
+            color=color_column,
+            size=size_column,
+            title=title,
+            template='plotly_white'
+        )
+        
+        fig.update_layout(
+            plot_bgcolor=self.theme.plot_background_color,
+            paper_bgcolor=self.theme.background_color,
+            font=dict(family=self.theme.font_family)
+        )
+        
+        return fig
+        
+    def create_bar_chart(
+        self,
+        data: pd.DataFrame,
+        x_column: str,
+        y_column: str,
+        color_column: Optional[str] = None,
+        title: str = ''
+    ) -> go.Figure:
+        """Create an interactive bar chart"""
+        fig = px.bar(
+            data,
+            x=x_column,
+            y=y_column,
+            color=color_column,
+            title=title,
+            template='plotly_white'
+        )
+        
+        fig.update_layout(
+            plot_bgcolor=self.theme.plot_background_color,
+            paper_bgcolor=self.theme.background_color,
+            font=dict(family=self.theme.font_family),
+            bargap=0.2
+        )
+        
+        return fig
+        
+    def create_pie_chart(
+        self,
+        data: pd.DataFrame,
+        names_column: str,
+        values_column: str,
+        title: str = ''
+    ) -> go.Figure:
+        """Create an interactive pie chart"""
+        fig = px.pie(
+            data,
+            names=names_column,
+            values=values_column,
+            title=title
+        )
+        
+        fig.update_layout(
+            plot_bgcolor=self.theme.plot_background_color,
+            paper_bgcolor=self.theme.background_color,
+            font=dict(family=self.theme.font_family)
+        )
+        
+        return fig
+        
+    def create_heatmap(
+        self,
+        data: pd.DataFrame,
+        x_column: str,
+        y_column: str,
+        values_column: str,
+        title: str = ''
+    ) -> go.Figure:
+        """Create an interactive heatmap"""
+        pivot_data = data.pivot(
+            index=y_column,
+            columns=x_column,
+            values=values_column
+        )
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=pivot_data.values,
+            x=pivot_data.columns,
+            y=pivot_data.index,
+            colorscale='RdYlBu_r'
+        ))
+        
+        fig.update_layout(
+            title=title,
+            plot_bgcolor=self.theme.plot_background_color,
+            paper_bgcolor=self.theme.background_color,
+            font=dict(family=self.theme.font_family)
+        )
+        
+        return fig
+        
+    def _get_color(self, index: int) -> str:
+        """Get color from theme based on index"""
+        colors = [
+            self.theme.primary_color,
+            self.theme.secondary_color,
+            self.theme.accent_color,
+            self.theme.success_color,
+            self.theme.warning_color,
+            self.theme.error_color
+        ]
+        return colors[index % len(colors)]
     
     def create_profit_chart(
         self,

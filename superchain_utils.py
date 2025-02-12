@@ -5,12 +5,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from typing import List, Dict, Tuple, Optional, Any, AsyncGenerator, Coroutine, TypeVar, Union, Callable, Protocol
+from typing import List, Dict, Tuple, Optional, Any, AsyncGenerator, Coroutine, TypeVar, Union, Callable, Protocol, cast
 from typing_extensions import TypeAlias
 import json
 import aiohttp
 from web3 import Web3, AsyncWeb3
-from web3.contract import Contract
+from web3.contract.contract import Contract  # Fixed import
 from eth_account.signers.local import LocalAccount
 import numpy as np
 from datetime import datetime, timedelta
@@ -24,12 +24,13 @@ import networkx as nx
 import os
 from dotenv import load_dotenv
 import time
-from web3.types import TxReceipt, Wei
+from web3.types import TxReceipt, Wei, BlockData, TxParams  # Added missing types
 from aiohttp import ClientSession
 from functools import wraps
 from src.core.web3_config import get_web3, get_async_web3
 from web3.exceptions import ContractLogicError, TransactionNotFound
 from hexbytes import HexBytes
+from eth_typing import Address, ChecksumAddress
 
 # Load environment variables
 load_dotenv()
@@ -45,568 +46,50 @@ if not private_key:
 
 logger.info("Using centralized Web3 provider in utils")
 
-# Common ABIs
-ERC20_ABI = [
-    {"constant":True,"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":False,"inputs":[{"name":"_to","type":"address"},{"name":"_value","type":"uint256"}],"name":"transfer","outputs":[{"name":"","type":"bool"}],"payable":False,"stateMutability":"nonpayable","type":"function"},
-    {"constant":False,"inputs":[{"name":"_spender","type":"address"},{"name":"_value","type":"uint256"}],"name":"approve","outputs":[{"name":"","type":"bool"}],"payable":False,"stateMutability":"nonpayable","type":"function"},
-    {"constant":True,"inputs":[{"name":"_owner","type":"address"},{"name":"_spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}
-]
+# Type aliases for improved type safety
+BlockNumber = int
+GasPrice = int
+Nonce = int
+Address = str
+TokenAmount = int
+Timestamp = int
 
-UNISWAP_V2_PAIR_ABI = [
-    {"constant":True,"inputs":[],"name":"getReserves","outputs":[{"name":"reserve0","type":"uint112"},{"name":"reserve1","type":"uint112"},{"name":"blockTimestampLast","type":"uint32"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[],"name":"token0","outputs":[{"name":"","type":"address"}],"payable":False,"stateMutability":"view","type":"function"},
-    {"constant":True,"inputs":[],"name":"token1","outputs":[{"name":"","type":"address"}],"payable":False,"stateMutability":"view","type":"function"}
-]
+# Enhanced type hints for network data
+NetworkData = TypeAlias = Dict[str, Union[float, str, Dict[str, Any]]]
+TransactionData = TypeAlias = Dict[str, Union[str, int, float, Dict[str, Any]]]
+PoolData = TypeAlias = Dict[str, Union[str, int, float, List[Any]]]
 
-UNISWAP_V3_POOL_ABI = [
-    {"inputs":[],"name":"slot0","outputs":[{"name":"sqrtPriceX96","type":"uint160"},{"name":"tick","type":"int24"},{"name":"observationIndex","type":"uint16"},{"name":"observationCardinality","type":"uint16"},{"name":"observationCardinalityNext","type":"uint16"},{"name":"feeProtocol","type":"uint8"},{"name":"unlocked","type":"bool"}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"liquidity","outputs":[{"name":"","type":"uint128"}],"stateMutability":"view","type":"function"},
-    {"inputs":[{"name":"tickLower","type":"int24"},{"name":"tickUpper","type":"int24"}],"name":"getPositionInfo","outputs":[{"name":"liquidity","type":"uint128"},{"name":"feeGrowthInside0LastX128","type":"uint256"},{"name":"feeGrowthInside1LastX128","type":"uint256"},{"name":"tokensOwed0","type":"uint128"},{"name":"tokensOwed1","type":"uint128"}],"stateMutability":"view","type":"function"}
-]
+class AsyncCallable(Protocol):
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
 
-AAVE_V3_POOL_ABI = [
-    {"inputs":[{"internalType":"address","name":"asset","type":"address"}],"name":"getReserveData","outputs":[{"components":[{"components":[{"internalType":"uint256","name":"data","type":"uint256"}],"internalType":"struct DataTypes.ReserveConfigurationMap","name":"configuration","type":"tuple"},{"internalType":"uint128","name":"liquidityIndex","type":"uint128"},{"internalType":"uint128","name":"currentLiquidityRate","type":"uint128"},{"internalType":"uint128","name":"variableBorrowIndex","type":"uint128"},{"internalType":"uint128","name":"currentVariableBorrowRate","type":"uint128"},{"internalType":"uint128","name":"currentStableBorrowRate","type":"uint128"},{"internalType":"uint40","name":"lastUpdateTimestamp","type":"uint40"},{"internalType":"uint16","name":"id","type":"uint16"},{"internalType":"address","name":"aTokenAddress","type":"address"},{"internalType":"address","name":"stableDebtTokenAddress","type":"address"},{"internalType":"address","name":"variableDebtTokenAddress","type":"address"},{"internalType":"address","name":"interestRateStrategyAddress","type":"address"},{"internalType":"uint128","name":"accruedToTreasury","type":"uint128"},{"internalType":"uint128","name":"unbacked","type":"uint128"},{"internalType":"uint128","name":"isolationModeTotalDebt","type":"uint128"}],"internalType":"struct DataTypes.ReserveData","name":"","type":"tuple"}],"stateMutability":"view","type":"function"}
-]
-
-COMPOUND_V2_POOL_ABI = [
-    {"constant":True,"inputs":[{"name":"asset","type":"address"}],"name":"getReserveData","outputs":[{"components":[{"name":"isActive","type":"bool"},{"name":"borrowEnabled","type":"bool"},{"name":"lastUpdateTimestamp","type":"uint40"}],"name":"","type":"tuple"}],"payable":False,"stateMutability":"view","type":"function"}
-]
-
-BALANCER_V3_POOL_ABI = [
-    {"inputs":[{"internalType":"address","name":"asset","type":"address"}],"name":"getReserveData","outputs":[{"components":[{"name":"isActive","type":"bool"}],"name":"","type":"tuple"}],"stateMutability":"view","type":"function"}
-]
-
-def get_token_abi() -> List[Dict]:
-    """Get standard ERC20 token ABI"""
-    return ERC20_ABI
-
-# Initialize Telegram bot
-telegram_bot = TelegramBot()
-
-# Base Chain Graph URLs
-GRAPH_ENDPOINTS = {
-    'aerodrome': 'https://api.thegraph.com/subgraphs/name/aerodrome-finance/aerodrome-v2-base',
-    'baseswap': 'https://api.studio.thegraph.com/query/50526/baseswap-v2/v0.0.1',
-    'alienbase': 'https://api.thegraph.com/subgraphs/name/alienbase/exchange'
-}
-
-# Uniswap V3 subgraph URL for Base Chain
-UNISWAP_V3_SUBGRAPH = "https://api.thegraph.com/subgraphs/name/uniswap/base-v3"
-
-# Base Chain DEX Configurations
-DEX_CONFIGS = {
-    'uniswap_v4': {
-        'router': '0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC',  # Universal Router
-        'factory': '0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
-        'type': 'UniswapV4',
-        'fee_tiers': [1, 3, 10]  # 0.01%, 0.3%, 1%
-    },
-    'sushiswap_v3': {
-        'router': '0x6BDED42c6DA8FD5E8B11852d05597c0F7C8D8E86',
-        'factory': '0xc35DADB65012eC5796536bD9864eD8773aBc74C4',
-        'type': 'UniswapV3',
-        'fee_tiers': [1, 3, 10]  # 0.01%, 0.3%, 1%
-    },
-    'pancakeswap_v4': {
-        'router': '0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86',
-        'factory': '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',
-        'type': 'UniswapV3',
-        'fee_tiers': [1, 2.5, 5]  # 0.01%, 0.25%, 0.5%
-    },
-    'aerodrome': {
-        'router': '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43',
-        'factory': '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
-        'type': 'UniswapV2',
-        'fee_tiers': [1]  # 0.1%
-    },
-    'baseswap': {
-        'router': '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
-        'factory': '0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB',
-        'type': 'UniswapV2',
-        'fee_tiers': [3]  # 0.3%
-    },
-    'alienbase': {
-        'router': '0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7',
-        'factory': '0x3E84D913803b02A4a7f027165E8cA42C14C0FdE7',
-        'type': 'UniswapV2',
-        'fee_tiers': [3]  # 0.3%
-    }
-}
-
-# Base Chain Lending Protocols for Flash Loans
-LENDING_CONFIGS = {
-    'aave_v3': {
-        'address': '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',  # Latest Aave V3 Pool
-        'type': 'AaveV3',
-        'flash_loan_fee': 0.05  # 0.05%
-    },
-    'balancer_v3': {
-        'address': '0xBA12222222228d8Ba445958a75a0704d566BF2C8',  # Latest Balancer V3 Vault
-        'type': 'BalancerV3',
-        'flash_loan_fee': 0.01  # 0.01%
-    },
-    'radiant': {
-        'address': '0x2032b9A8e9F7e76768CA9271003d3e43E1616B1F',
-        'type': 'AaveV2',
-        'flash_loan_fee': 0.09  # 0.09%
-    }
-}
-
-# Most liquid token pairs on Base
-TOKEN_PAIRS = [
-    ('ETH', 'USDbC'),     # Most liquid pair
-    ('USDbC', 'USDC'),    # Stablecoin pair
-    ('ETH', 'USDC'),      # Secondary ETH pair
-    ('DAI', 'USDbC'),     # Additional stablecoin pair
-    ('ETH', 'cbETH'),     # Liquid ETH derivative pair
-    ('tBTC', 'ETH')       # Bitcoin-ETH pair
-]
-
-# Token addresses on Base
-TOKEN_ADDRESSES = {
-    'ETH': '0x4200000000000000000000000000000000000006',  # WETH on Base
-    'USDbC': '0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA',
-    'USDC': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-    'DAI': '0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',
-    'USDT': '0x4A3A6Dd60A34bB2Aba60D73B4C88315E9CeB6A3D',
-    'cbETH': '0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22',
-    'WETH': '0x4200000000000000000000000000000000000006',
-    'tBTC': '0x236aa50979D5f3De3Bd1Eeb40E81137F22ab794b',
-    'axlUSDC': '0xEB466342C4d449BC9f53A865D5Cb90586f405215',
-    'MAI': '0xbf1aeA8670D2528E08334083616dD9C5F3B087aE',
-    'COMP': '0x9e1028F5F1D5eDE59748FFceE5532509976840E0',
-    'MKR': '0x7c6b91D9Be155A6Db01f749217d76fF02A7227F2'
-}
-
-# Test amounts for each token (in base units)
-TEST_AMOUNTS = {
-    'ETH': [0.1, 0.5, 1, 5],
-    'USDbC': [100, 500, 1000, 5000],
-    'USDC': [100, 500, 1000, 5000],
-    'DAI': [100, 500, 1000, 5000],
-    'USDT': [100, 500, 1000, 5000],
-    'cbETH': [0.1, 0.5, 1, 5],
-    'WETH': [0.1, 0.5, 1, 5],
-    'tBTC': [0.01, 0.05, 0.1, 0.5],
-    'axlUSDC': [100, 500, 1000, 5000],
-    'MAI': [100, 500, 1000, 5000],
-    'COMP': [1, 5, 10, 50],
-    'MKR': [0.1, 0.5, 1, 5]
-}
-
-async def fetch_dex_data(session: aiohttp.ClientSession, 
-                        dex_name: str, 
-                        dex_info: Dict) -> Dict:
-    """Fetch market data from a specific DEX"""
-    # Implement DEX-specific data fetching logic
-    if dex_info['type'] == 'UniswapV3':
-        return await fetch_uniswap_v3_data(session, dex_info['address'])
-    elif dex_info['type'] == 'UniswapV2':
-        return await fetch_uniswap_v2_data(session, dex_info['address'])
-    else:
-        raise ValueError(f"Unsupported DEX type: {dex_info['type']}")
-
-def calculate_volatility_v3(pool: Dict) -> float:
-    """Calculate volatility from pool data"""
-    try:
-        price = float(pool['token0Price'])
-        tick = int(pool['tick'])
-        return abs(price * tick / 1e6)  # Simplified volatility calculation
-    except Exception:
-        return 0.0
-
-def calculate_price_impact_v3(pool: Dict) -> float:
-    """Calculate price impact from pool data"""
-    try:
-        liquidity = float(pool['liquidity'])
-        return 1.0 / (liquidity + 1e-18)  # Simplified price impact calculation
-    except Exception:
-        return 0.0
-
-async def fetch_uniswap_v3_data(session: aiohttp.ClientSession, 
-                               address: str) -> Dict:
-    """Fetch market data from Uniswap V3"""
-    query = """
-    {
-      pool(id: "%s") {
-        token0Price
-        token1Price
-        liquidity
-        volumeUSD
-        feeTier
-        tick
-        sqrtPrice
-        token0 {
-          symbol
-          decimals
-        }
-        token1 {
-          symbol
-          decimals
-        }
-      }
-    }
-    """ % address.lower()
-    
-    try:
-        async with session.post(UNISWAP_V3_SUBGRAPH, json={'query': query}) as response:
-            if response.status == 200:
-                data = await response.json()
-                if not data.get('data') or not data['data'].get('pool'):
-                    logger.warning(f"Pool not found for address: {address}")
-                    return {}
-                    
-                pool = data['data']['pool']
-                return {
-                    'price_impact': calculate_price_impact_v3(pool),
-                    'liquidity': float(pool['liquidity']),
-                    'volatility': calculate_volatility_v3(pool),
-                    'volume_24h': float(pool['volumeUSD']),
-                    'fee_tier': int(pool['feeTier']),
-                    'current_tick': int(pool['tick']),
-                    'sqrt_price': pool['sqrtPrice']
-                }
-            return {}
-    except Exception as e:
-        logger.error(f"Exception in fetch_uniswap_v3_data: {str(e)}")
-        return {}
-
-async def fetch_uniswap_v2_data(session: aiohttp.ClientSession, 
-                               address: str) -> Dict[str, Union[float, str]]:
-    """Fetch market data from Uniswap V2-style DEXes
-    
-    Args:
-        session: aiohttp client session
-        address: Pool address
-        
-    Returns:
-        Dict containing pool data or empty dict on error
-    """
-    try:
-        async with session.get(
-            f"https://api.base.fi/v1/pairs/{address}",
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                return {
-                    'reserves0': float(data.get('reserve0', 0)),
-                    'reserves1': float(data.get('reserve1', 0)),
-                    'volume_24h': float(data.get('volume24h', 0)),
-                    'tvl': float(data.get('tvl', 0)),
-                    'price': float(data.get('price', 0)),
-                    'price_change_24h': float(data.get('priceChange24h', 0)),
-                    'timestamp': datetime.now().isoformat()  # Keep as ISO format string
-                }
-            else:
-                logger.error(f"Error fetching Uniswap V2 data: HTTP {response.status}")
-                return {}
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching data for pool {address}")
-        return {}
-    except Exception as e:
-        logger.error(f"Exception in fetch_uniswap_v2_data: {str(e)}")
-        return {}
-
-def get_optimal_lending_protocol(token: str, amount: float) -> Optional[Dict[str, Any]]:
-    """Get the optimal lending protocol based on fees and liquidity
-    
-    Args:
-        token: Token address
-        amount: Amount to borrow
-        
-    Returns:
-        Dict with protocol info or None if no suitable protocol found
-    """
-    try:
-        best_protocol = None
-        lowest_fee = float('inf')
-        
-        for protocol, config in LENDING_CONFIGS.items():
-            # Skip protocols in testnet mode unless we're testing
-            if config['testnet'] and not os.getenv('TESTING', '').lower() == 'true':
-                continue
-                
-            # Check if protocol supports the token
-            if not web3.eth.contract(
-                address=config['address'],
-                abi=get_lending_pool_abi(config['type'])
-            ).functions.getReserveData(token).call()['isActive']:
-                continue
-                
-            # Compare fees
-            if config['flash_loan_fee'] < lowest_fee:
-                best_protocol = {
-                    'protocol': protocol,
-                    'address': config['address'],
-                    'type': config['type'],
-                    'fee': config['flash_loan_fee']
-                }
-                lowest_fee = config['flash_loan_fee']
-        
-        if best_protocol is None:
-            logger.warning(f"No suitable lending protocol found for token {token}")
-            
-        return best_protocol
-        
-    except Exception as e:
-        logger.error(f"Error getting optimal lending protocol: {str(e)}")
-        return None
-
-def calculate_gas_estimate(lending_protocol: Dict) -> int:
-    """Calculate estimated gas cost based on protocol type"""
-    try:
-        base_gas = 150000  # Base gas for flash loan
-        if lending_protocol['type'] == 'AaveV3':
-            return base_gas + 80000  # Additional gas for Aave V3
-        elif lending_protocol['type'] == 'CompoundV2':
-            return base_gas + 60000  # Additional gas for Compound V2
-        return base_gas
-    except Exception as e:
-        logger.error(f"Error calculating gas estimate: {str(e)}")
-        return 200000  # Default safe estimate
-
-def calculate_price_impact(amount: float, market_data: Dict) -> float:
-    """Calculate price impact of a trade"""
-    try:
-        liquidity = market_data.get('liquidity', 0)
-        if liquidity == 0:
-            return float('inf')
-        return min((amount / liquidity) * 100, 100.0)  # Cap at 100%
-    except Exception as e:
-        logger.error(f"Error calculating price impact: {str(e)}")
-        return float('inf')
-
-def prepare_flash_loan(token_pair: Tuple[str, str], 
-                      amount: float,
-                      market_data: Dict) -> Dict:
-    """Enhanced flash loan preparation with safety checks"""
-    try:
-        # Calculate optimal parameters
-        min_profit = max(amount * 0.002, market_data.get('min_profit', 0))  # 0.2% or market minimum
-        deadline = min(300, market_data.get('block_time', 0) + 100)  # 5 minutes or block time + buffer
-        slippage = min(0.005, market_data.get('volatility', 0) * 2)  # 0.5% or 2x volatility
-        
-        # Get optimal lending protocol
-        lending_protocol = get_optimal_lending_protocol(token_pair[0], amount)
-        
-        return {
-            'token_in': token_pair[0],
-            'token_out': token_pair[1],
-            'amount': amount,
-            'min_profit': min_profit,
-            'deadline': deadline,
-            'slippage_tolerance': slippage,
-            'lending_protocol': lending_protocol,
-            'gas_estimate': calculate_gas_estimate(lending_protocol) if lending_protocol is not None else 0,
-            'safety_checks': {
-                'has_liquidity': True,
-                'price_impact': calculate_price_impact(amount, market_data),
-                'risk_score': calculate_risk_score(market_data)
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error preparing flash loan: {str(e)}")
-        return {
-            'error': str(e),
-            'success': False,
-            'token_in': token_pair[0] if token_pair else '',
-            'token_out': token_pair[1] if token_pair else ''
-        }
+def retry_async(retries: int = 3, delay: int = 1) -> Callable[[AsyncCallable], AsyncCallable]:
+    """Retry async function with exponential backoff"""
+    def decorator(func: AsyncCallable) -> AsyncCallable:
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            for attempt in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == retries - 1:
+                        raise
+                    await asyncio.sleep(delay * (2 ** attempt))
+            return None
+        return wrapper
+    return decorator
 
 async def get_network_congestion() -> float:
     """Get current network congestion level (0-1)"""
     try:
-        latest_block = await async_web3.eth.get_block('latest')
-        gas_used_ratio = latest_block['gasUsed'] / latest_block['gasLimit']
-        return min(gas_used_ratio, 1.0)
+        latest_block = cast(BlockData, await async_web3.eth.get_block('latest'))
+        gas_used = int(latest_block.get('gasUsed', 0))
+        gas_limit = int(latest_block.get('gasLimit', 21000000))
+        return min(gas_used / gas_limit if gas_limit > 0 else 0.5, 1.0)
     except Exception as e:
         logger.error(f"Error getting network congestion: {str(e)}")
         return 0.5
 
-async def optimize_gas_strategy(params: Dict[str, Any]) -> Dict[str, Union[int, float]]:
-    """Optimize gas strategy based on network conditions"""
-    try:
-        base_gas = await async_web3.eth.gas_price
-        network_congestion = await get_network_congestion()
-        
-        gas_multiplier = 1.1 if network_congestion > 0.8 else 1.0
-        optimal_gas = int(base_gas * gas_multiplier)
-        max_priority_fee = await async_web3.eth.max_priority_fee
-        
-        return {
-            'gas_price': optimal_gas,
-            'gas_limit': params.get('gas_estimate', 300000),
-            'max_priority_fee': max_priority_fee,
-            'network_congestion': network_congestion
-        }
-    except Exception as e:
-        logger.error(f"Error optimizing gas strategy: {str(e)}")
-        return {
-            'gas_price': await async_web3.eth.gas_price,
-            'gas_limit': 300000,
-            'max_priority_fee': 1500000000,
-            'network_congestion': 0.5
-        }
-
-def is_gas_acceptable(gas_strategy: Dict) -> bool:
-    """Check if gas price is within acceptable limits"""
-    try:
-        MAX_GAS_PRICE = 500  # Maximum gas price in GWEI
-        MAX_NETWORK_CONGESTION = 0.8  # Maximum acceptable network congestion
-        
-        return (
-            gas_strategy['gas_price'] <= MAX_GAS_PRICE and 
-            gas_strategy['network_congestion'] <= MAX_NETWORK_CONGESTION
-        )
-    except Exception as e:
-        logger.error(f"Error checking gas acceptability: {str(e)}")
-        return False
-
-async def verify_sufficient_liquidity(params: Dict) -> bool:
-    """Verify if there is sufficient liquidity for the trade"""
-    try:
-        MIN_LIQUIDITY_RATIO = 3  # Minimum ratio of liquidity to trade size
-        
-        amount = params.get('amount', 0)
-        liquidity = params.get('market_data', {}).get('liquidity', 0)
-        
-        return liquidity >= amount * MIN_LIQUIDITY_RATIO
-    except Exception as e:
-        logger.error(f"Error verifying liquidity: {str(e)}")
-        return False
-
-def validate_parameters(params: Dict) -> bool:
-    """Validate transaction parameters"""
-    try:
-        required_fields = ['amount', 'token_in', 'token_out', 'deadline']
-        if not all(field in params for field in required_fields):
-            return False
-            
-        return (
-            params['amount'] > 0 and
-            params['deadline'] > 0 and
-            params['token_in'] in TOKEN_ADDRESSES and
-            params['token_out'] in TOKEN_ADDRESSES
-        )
-    except Exception as e:
-        logger.error(f"Error validating parameters: {str(e)}")
-        return False
-
-async def validate_price_deviation(params: Dict) -> bool:
-    """Check if price deviation is within acceptable limits"""
-    try:
-        MAX_PRICE_DEVIATION = 0.02  # 2% maximum deviation
-        
-        current_price = params.get('market_data', {}).get('current_price', 0)
-        expected_price = params.get('market_data', {}).get('expected_price', 0)
-        
-        if current_price == 0 or expected_price == 0:
-            return False
-            
-        deviation = abs(current_price - expected_price) / expected_price
-        return deviation <= MAX_PRICE_DEVIATION
-        
-    except Exception as e:
-        logger.error(f"Error validating price deviation: {str(e)}")
-        return False
-
-async def check_balances(params: Dict) -> bool:
-    """Check if there are sufficient balances for the transaction"""
-    try:
-        # Check ETH balance for gas
-        eth_balance = Web3.eth.get_balance(params['wallet_address'])
-        required_eth = params['gas_estimate'] * params.get('gas_price', Web3.eth.gas_price)
-        
-        if eth_balance < required_eth:
-            logger.error("Insufficient ETH for gas")
-            return False
-            
-        # Check token balance if not a flash loan
-        if params.get('type') != 'flash_loan':
-            token_contract = web3.eth.contract(
-                address=Web3.to_checksum_address(TOKEN_ADDRESSES[params['token_in']]), 
-                abi=params['token_abi']
-            )
-            token_balance = await token_contract.functions.balanceOf(params['wallet_address']).call()
-            
-            if token_balance < params['amount']:
-                logger.error("Insufficient token balance")
-                return False
-                
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error checking balances: {str(e)}")
-        return False
-
-async def verify_contract_states(params: Dict) -> bool:
-    """Verify the state of relevant contracts"""
-    try:
-        # Check if contracts are paused
-        for contract_address in [params.get('dex_address'), params.get('lending_address')]:
-            if contract_address:
-                contract = web3.eth.contract(
-                    address=Web3.to_checksum_address(contract_address), 
-                    abi=params['contract_abi']
-                )
-                if hasattr(contract.functions, 'paused') and await contract.functions.paused().call():
-                    logger.error(f"Contract {contract_address} is paused")
-                    return False
-        
-        # Verify token approvals are still valid
-        token_contract = web3.eth.contract(
-            address=Web3.to_checksum_address(TOKEN_ADDRESSES[params['token_in']]), 
-            abi=params['token_abi']
-        )
-        allowance = await token_contract.functions.allowance(
-            params['wallet_address'],
-            params.get('dex_address', params.get('lending_address'))
-        ).call()
-        
-        if allowance < params['amount']:
-            logger.error("Insufficient token allowance")
-            return False
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error verifying contract states: {str(e)}")
-        return False
-
-async def check_token_approvals(params: Dict) -> bool:
-    """Check if token approvals are sufficient for the transaction"""
-    try:
-        # Get token contract
-        token_contract = web3.eth.contract(
-            address=Web3.to_checksum_address(TOKEN_ADDRESSES[params['token_in']]), 
-            abi=params['token_abi']
-        )
-        
-        # Check approvals for DEX and lending protocol
-        for spender in [params.get('dex_address'), params.get('lending_address')]:
-            if spender:
-                allowance = await token_contract.functions.allowance(
-                    params['wallet_address'],
-                    spender
-                ).call()
-                
-                if allowance < params['amount']:
-                    logger.error(f"Insufficient allowance for spender {spender}")
-                    return False
-                    
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error checking token approvals: {str(e)}")
-        return False
-
-async def simulate_transaction(params: Dict) -> Dict:
+async def simulate_transaction(params: Dict[str, Any]) -> Dict[str, Any]:
     """Simulate transaction to check for potential issues"""
     try:
         # Create transaction object with validation
@@ -618,28 +101,19 @@ async def simulate_transaction(params: Dict) -> Dict:
         if not target_address:
             raise ValueError("No target address provided")
 
-        # Create transaction object
-        tx = {
-            'from': params['wallet_address'],
-            'to': target_address,
+        # Create transaction parameters
+        tx_params: TxParams = {
+            'from': Web3.to_checksum_address(params['wallet_address']),
+            'to': Web3.to_checksum_address(target_address),
             'value': params.get('value', 0),
             'gas': params['gas_estimate'],
-            'gasPrice': params.get('gas_price', Web3.eth.gas_price),
-            'nonce': Web3.eth.get_transaction_count(params['wallet_address']),
+            'gasPrice': params.get('gas_price', await async_web3.eth.gas_price),
+            'nonce': await async_web3.eth.get_transaction_count(params['wallet_address']),
             'data': params.get('data', '0x')
         }
         
         # Simulate transaction using eth_call
         try:
-            tx_params = {
-                'from': Web3.to_checksum_address(params['wallet_address']),
-                'to': Web3.to_checksum_address(params.get('dex_address', params.get('lending_address'))),
-                'value': params.get('value', 0),
-                'gas': params['gas_estimate'],
-                'gasPrice': params.get('gas_price', await async_web3.eth.gas_price),
-                'nonce': await async_web3.eth.get_transaction_count(params['wallet_address']),
-                'data': params.get('data', '0x')
-            }
             result = await async_web3.eth.call(tx_params)
             success = True
         except Exception as e:
@@ -663,303 +137,37 @@ async def simulate_transaction(params: Dict) -> Dict:
             'error': str(e)
         }
 
-async def execute_transaction_with_timeout(
-    params: Dict[str, Any], 
-    gas_strategy: Dict[str, Union[int, float]], 
-    timeout: int = 30
-) -> Optional[str]:
-    """Execute transaction with timeout"""
-    try:
-        if not async_web3:
-            raise ValueError("Web3 not initialized")
-
-        tx = {
-            'from': params['wallet_address'],
-            'to': params.get('dex_address', params.get('lending_address')),
-            'value': params.get('value', 0),
-            'gas': gas_strategy['gas_limit'],
-            'gasPrice': gas_strategy['gas_price'],
-            'nonce': await async_web3.eth.get_transaction_count(params['wallet_address']),
-            'data': params.get('data', '0x'),
-            'maxPriorityFeePerGas': gas_strategy.get('max_priority_fee', 0)
-        }
-        
-        async with asyncio.timeout(timeout):
-            signed_tx = async_web3.eth.account.sign_transaction(tx, params['private_key'])
-            tx_hash = await async_web3.eth.send_raw_transaction(signed_tx.rawTransaction)
-            return tx_hash.hex()
-            
-    except asyncio.TimeoutError:
-        logger.error("Transaction execution timed out")
-        return None
-    except Exception as e:
-        logger.error(f"Error executing transaction: {str(e)}")
-        return None
-
-async def wait_for_confirmation_with_timeout(
-    tx_hash: str, 
-    timeout: int = 180
-) -> Dict[str, Union[bool, int]]:
-    """Wait for transaction confirmation with timeout"""
-    try:
-        if not async_web3:
-            raise ValueError("Web3 not initialized")
-
-        async with asyncio.timeout(timeout):
-            while True:
-                try:
-                    receipt = await async_web3.eth.get_transaction_receipt(
-                        HexBytes(tx_hash)
-                    )
-                    if receipt:
-                        return {
-                            'success': receipt['status'] == 1,
-                            'gas_used': receipt['gasUsed'],
-                            'block_number': receipt['blockNumber']
-                        }
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout waiting for confirmation of tx {tx_hash}")
-        return {'success': False, 'gas_used': 0, 'block_number': 0}
-    except Exception as e:
-        logger.error(f"Error waiting for confirmation: {str(e)}")
-        return {'success': False, 'gas_used': 0, 'block_number': 0}
-
-async def pre_execution_checks(params: Dict) -> bool:
-    """Comprehensive pre-execution validation"""
-    try:
-        # 1. Validate parameters
-        if not validate_parameters(params):
-            return False
-            
-        # 2. Check token approvals
-        if not await check_token_approvals(params):
-            return False
-            
-        # 3. Verify contract states
-        if not await verify_contract_states(params):
-            return False
-            
-        # 4. Check balance requirements
-        if not await check_balances(params):
-            return False
-            
-        # 5. Validate price deviation
-        if not await validate_price_deviation(params):
-            return False
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Pre-execution checks failed: {str(e)}")
-        return False
-
-async def safe_execute_transaction(params: Dict) -> bool:
-    """Enhanced transaction execution with comprehensive safety checks"""
-    try:
-        # 1. Pre-execution checks
-        if not await pre_execution_checks(params):
-            return False
-            
-        # 2. Gas price check
-        gas_strategy = await optimize_gas_strategy(params)
-        if not is_gas_acceptable(gas_strategy):
-            return False
-            
-        # 3. Liquidity verification
-        if not await verify_sufficient_liquidity(params):
-            return False
-            
-        # 4. Simulate transaction
-        simulation_result = await simulate_transaction(params)
-        if not simulation_result['success']:
-            logger.error(f"Transaction simulation failed: {simulation_result['error']}")
-            return False
-            
-        # 5. Execute transaction with retry mechanism
-        for attempt in range(3):
-            try:
-                tx_hash = await execute_transaction_with_timeout(params, gas_strategy)
-                if not tx_hash:
-                    continue
-                    
-                # 6. Wait for confirmation with timeout
-                confirmation = await wait_for_confirmation_with_timeout(tx_hash)
-                if confirmation['success']:
-                    # Add strategy and protocol information to execution result
-                    params['execution_result'] = {
-                        'success': True,
-                        'tx_hash': tx_hash,
-                        'gas_used': confirmation['gas_used'],
-                        'block_number': confirmation['block_number'],
-                        'dex_used': params.get('dex_address', 'Unknown DEX'),
-                        'lending_protocol': params.get('lending_protocol', {}).get('protocol', 'Unknown Protocol'),
-                        'type': params.get('strategy_type', 'Unknown Strategy'),
-                        'profit': params.get('expected_profit', 0)
-                    }
-                    return True
-                    
-            except Exception as e:
-                logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
-                await asyncio.sleep(1)
-                
-        return False
-        
-    except Exception as e:
-        logger.error(f"Transaction execution failed: {str(e)}")
-        return False
-
-def prepare_training_data(raw_data: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
-    """Prepare training data for the model"""
-    X = []  # Features
-    y = []  # Labels (profit, confidence, risk)
-    
-    for data in raw_data:
-        features = [
-            data['amount'],
-            data['price_impact'],
-            data['liquidity'],
-            data['volatility'],
-            data['gas_price'],
-            data['block_time'],
-            data['price_difference'],
-            data['volume_24h']
-        ]
-        
-        labels = [
-            data['actual_profit'],
-            data['success_rate'],
-            data['risk_level']
-        ]
-        
-        X.append(features)
-        y.append(labels)
-    
-    return np.array(X), np.array(y)
-
-def calculate_risk_score(market_data: Dict) -> float:
-    """Calculate risk score based on market conditions"""
-    # Implement risk scoring logic
-    volatility_weight = 0.3
-    liquidity_weight = 0.3
-    volume_weight = 0.2
-    price_impact_weight = 0.2
-    
-    risk_score = (
-        volatility_weight * market_data['volatility'] +
-        liquidity_weight * (1 - market_data['liquidity']) +
-        volume_weight * (1 - market_data['volume_24h']) +
-        price_impact_weight * market_data['price_impact']
-    )
-    
-    return min(max(risk_score, 0), 1)  # Normalize to [0, 1]
-
-def get_token_pairs() -> List[Tuple[str, str]]:
-    """Get list of token pairs to monitor"""
-    return TOKEN_PAIRS
-
-def get_test_amounts() -> Dict[str, List[float]]:
-    """Get test amounts for each token"""
-    return TEST_AMOUNTS 
-
-# Load configurations from config.json
-def load_dex_config():
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-            return config.get('dexes', {})
-    except Exception as e:
-        logger.error(f"Error loading config.json: {str(e)}")
-        return {}
-
-DEX_CONFIGS = load_dex_config()
-
-# Initialize market data caches with default values
-MARKET_DATA_DEFAULTS = {
-    'price': 0.0,
-    'volume': 0.0,
-    'liquidity': 0.0,
-    'timestamp': datetime.now().isoformat()
-}
-
-# Initialize history tracking with minimum structure
-HISTORY_DEFAULTS = {
-    'opportunities': [],
-    'market_snapshots': {},
-    'performance': {
-        'total_profit': 0.0,
-        'successful_trades': 0,
-        'failed_trades': 0,
-        'gas_spent': 0.0
-    }
-}
-
-# Initialize cache settings
-CACHE_SETTINGS = {
-    'ttl': 300,  # 5 minutes
-    'max_size': 1000,
-    'cleanup_interval': 3600  # 1 hour
-}
-
-# Type aliases
-DexData: TypeAlias = Dict[str, Dict[str, Any]]
-MarketData: TypeAlias = Dict[str, Dict[str, Any]]
-TokenData: TypeAlias = Dict[str, Any]
-PriceData: TypeAlias = Dict[str, Any]
-VolumeData: TypeAlias = Dict[str, Any]
-
-# Type variable for generic functions
-T = TypeVar('T')
-
-class AsyncCallable(Protocol):
-    async def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
-
-def retry_async(retries: int = 3, delay: int = 1) -> Callable[[AsyncCallable], AsyncCallable]:
-    def decorator(func: AsyncCallable) -> AsyncCallable:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            for attempt in range(retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == retries - 1:
-                        raise
-                    await asyncio.sleep(delay * (2 ** attempt))
-            return None
-        return wrapper
-    return decorator
-
-def validate_input(validator: Callable[..., Coroutine[Any, Any, bool]]) -> Callable[[AsyncCallable], AsyncCallable]:
-    def decorator(func: AsyncCallable) -> AsyncCallable:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not await validator(*args, **kwargs):
-                raise ValidationError("Input validation failed")
-            return await func(*args, **kwargs)
-        return wrapper
-    return decorator
-
 class TokenDiscovery:
-    def __init__(self):
-        # Initialize data structures with defaults
-        self.token_history = {}
-        self.price_history = {}
-        self.volume_history = {}
+    """Enhanced token discovery with safety checks"""
+    
+    # Standard ERC20 ABI
+    ERC20_ABI = [
+        {"constant":True,"inputs":[],"name":"name","outputs":[{"name":"","type":"string"}],"payable":False,"stateMutability":"view","type":"function"},
+        {"constant":True,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"payable":False,"stateMutability":"view","type":"function"},
+        {"constant":True,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"payable":False,"stateMutability":"view","type":"function"},
+        {"constant":True,"inputs":[],"name":"totalSupply","outputs":[{"name":"","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"},
+        {"constant":True,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"payable":False,"stateMutability":"view","type":"function"}
+    ]
+    
+    def __init__(self, contract_address: Optional[str] = None):
+        """Initialize token discovery with optional contract address"""
+        self.contract_address = contract_address
+        self.token_history: Dict[str, Dict[str, Any]] = {}
+        self.price_history: Dict[str, Dict[str, Any]] = {}
+        self.volume_history: Dict[str, Dict[str, Any]] = {}
         self.last_cleanup = datetime.now()
         
         # Initialize discovered tokens cache
-        self.discovered_tokens = {}
+        self.discovered_tokens: Dict[str, Dict[str, Any]] = {}
         
         # Initialize validation results cache
-        self.validation_results = {}
+        self.validation_results: Dict[str, bool] = {}
         
         # Initialize token blacklist
-        self.blacklisted_tokens = set()
+        self.blacklisted_tokens: set = set()
         
         # Initialize token scoring history
-        self.token_scores = {}
+        self.token_scores: Dict[str, float] = {}
         
         # Initialize locks for thread safety
         self._token_lock = asyncio.Lock()
@@ -974,13 +182,7 @@ class TokenDiscovery:
         self.ANALYSIS_INTERVALS = [1, 4, 12, 24, 72]  # Hours to analyze
         self.MAX_OWNER_PERCENTAGE = 20  # Maximum percentage of supply owned by contract owner
         
-        # Enhanced security thresholds
-        self.MAX_WHALE_CONCENTRATION = 20  # Max 20% held by top 10 non-LP holders
-        self.MIN_UNIQUE_TRADERS = 50  # Min unique traders in 24h
-        self.MAX_SELL_TAX_INCREASE = 2  # Max 2x tax increase from initial
-        self.MAX_FAILED_SELLS = 10  # Max % of failed sell transactions
-        
-        # Malicious signatures and patterns
+        # Malicious patterns and signatures
         self.MALICIOUS_SIGNATURES = [
             'blacklist', 'pause', 'mint', 'burn', 'setTaxRate', 'setMaxTxAmount',
             'excludeFromFee', 'setFeeAddress', 'updateFee', 'setMaxWallet'
@@ -996,839 +198,9 @@ class TokenDiscovery:
         # Initialize Web3
         self.web3 = Web3(Web3.HTTPProvider(os.getenv('BASE_MAINNET_RPC')))
 
-    async def cleanup_old_data(self) -> None:
-        """Cleanup historical data older than 72 hours"""
-        try:
-            current_time = datetime.now()
-            cutoff_time = current_time - timedelta(hours=72)
-            
-            async with self._token_lock:
-                self.token_history = {k: v for k, v in self.token_history.items() 
-                                    if v.get('last_updated', current_time) > cutoff_time}
-                
-            async with self._price_lock:
-                self.price_history = {k: v for k, v in self.price_history.items() 
-                                    if v.get('last_updated', current_time) > cutoff_time}
-                
-            async with self._volume_lock:
-                self.volume_history = {k: v for k, v in self.volume_history.items() 
-                                    if v.get('last_updated', current_time) > cutoff_time}
-            
-            self.last_cleanup = current_time
-            logger.info("Completed historical data cleanup")
-            
-        except Exception as e:
-            logger.error(f"Error in cleanup_old_data: {str(e)}")
-
-    async def update_token_data(self, token_address: str, data: Dict[str, Any]) -> None:
-        """Update token historical data"""
-        try:
-            async with self._token_lock:
-                data['last_updated'] = datetime.now()
-                self.token_history[token_address] = data
-        except Exception as e:
-            logger.error(f"Error updating token data: {str(e)}")
-
-    async def update_price_data(self, token_pair: str, price_data: Dict[str, Any]) -> None:
-        """Update price historical data"""
-        try:
-            async with self._price_lock:
-                price_data['last_updated'] = datetime.now()
-                self.price_history[token_pair] = price_data
-        except Exception as e:
-            logger.error(f"Error updating price data: {str(e)}")
-
-    async def update_volume_data(self, token_pair: str, volume_data: Dict[str, Any]) -> None:
-        """Update volume historical data"""
-        try:
-            async with self._volume_lock:
-                volume_data['last_updated'] = datetime.now()
-                self.volume_history[token_pair] = volume_data
-        except Exception as e:
-            logger.error(f"Error updating volume data: {str(e)}")
-
-    async def safe_execute(
-        self, 
-        func: Callable[..., Coroutine[Any, Any, T]], 
-        *args: Any, 
-        **kwargs: Any
-    ) -> Optional[T]:
-        """Safely execute async functions with error handling"""
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"Error executing {func.__name__}: {str(e)}")
-            return None
-
-    async def validate_token(
-        self, 
-        session: ClientSession, 
-        token: Dict[str, Any], 
-        pair: Optional[Dict[str, Any]] = None
-    ) -> bool:
-        """Comprehensive token validation"""
-        try:
-            # Basic validation
-            if not self.basic_validation(token):
-                return False
-
-            # Contract validation
-            if not await self.validate_contract(session, token['address']):
-                return False
-
-            # Security checks
-            if await self.detect_scam_patterns(session, token['address']):
-                return False
-
-            # Historical analysis
-            history = await self.analyze_token_history(session, token['address'])
-            if not history or history.get('risk_score', 1.0) > 0.7:
-                return False
-
-            # Liquidity checks
-            if pair and not await self.validate_liquidity(session, token, pair):
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in validate_token: {str(e)}")
-            return False
-
-    def basic_validation(self, token: Dict) -> bool:
-        """Perform basic token validation checks"""
-        try:
-            # Must have symbol and decimals
-            if not token.get('symbol') or not token.get('decimals'):
-                return False
-                
-            # Symbol length check
-            if len(token['symbol']) > 12:
-                return False
-                
-            # Decimal range check
-            if not (0 <= int(token['decimals']) <= 18):
-                return False
-                
-            # Blacklist common scam token names
-            blacklist = ['TEST', 'SCAM', 'HONEY', 'FAKE']
-            if any(word in token['symbol'].upper() for word in blacklist):
-                return False
-                
-            return True
-            
-        except Exception:
-            return False
-
-    async def validate_contract(self, session: ClientSession, token_address: str) -> bool:
-        """Validate token smart contract"""
-        try:
-            # Get contract code and verify it's not empty
-            code = await async_web3.eth.get_code(Web3.to_checksum_address(token_address))
-            if len(code) < 100:  # Empty or proxy contract
-                return False
-                
-            # Check contract verification on Basescan
-            if not await self.is_contract_verified(session, token_address):
-                return False
-                
-            # Check for common security patterns
-            security_score = await self.check_security_patterns(session, token_address)
-            if security_score < 0.7:  # Require 70% security score
-                return False
-                
-            return True
-            
-        except Exception:
-            return False
-
-    async def check_security_patterns(self, session: ClientSession, token_address: str) -> float:
-        """Check for security patterns in contract code and return a score between 0 and 1"""
-        try:
-            # Get contract code
-            code = await async_web3.eth.get_code(Web3.to_checksum_address(token_address))
-            code_str = code.hex()
-            
-            # Initialize score
-            score = 1.0
-            
-            # Check for dangerous patterns
-            dangerous_patterns = [
-                'selfdestruct',
-                'delegatecall',
-                'SELFDESTRUCT',
-                'DELEGATECALL',
-                'CALLCODE'
-            ]
-            
-            for pattern in dangerous_patterns:
-                if pattern in code_str:
-                    score *= 0.5
-                    
-            # Check for ownership patterns
-            ownership_patterns = [
-                'onlyOwner',
-                'Ownable',
-                'transferOwnership'
-            ]
-            
-            for pattern in ownership_patterns:
-                if pattern in code_str:
-                    score *= 0.8
-                    
-            return max(0.0, min(score, 1.0))
-            
-        except Exception as e:
-            logger.error(f"Error checking security patterns: {str(e)}")
-            return 0.0
-
-    async def detect_scam_patterns(self, session: ClientSession, token_address: str) -> bool:
-        """Enhanced scam detection with multiple security checks"""
-        try:
-            # Get contract code and ABI
-            code = await async_web3.eth.get_code(Web3.to_checksum_address(token_address))
-            abi = await self.get_contract_abi(session, token_address)
-            contract = self.web3.eth.contract(address=Web3.to_checksum_address(token_address), abi=abi)
-            
-            # 1. Check for malicious functions
-            if await self.has_malicious_functions(contract, code):
-                logger.warning(f"Malicious functions detected in {token_address}")
-                return True
-            
-            # 2. Check ownership patterns
-            if await self.check_dangerous_ownership(contract, token_address):
-                logger.warning(f"Dangerous ownership pattern in {token_address}")
-                return True
-            
-            # 3. Analyze liquidity patterns
-            if await self.analyze_liquidity_patterns(contract, token_address):
-                logger.warning(f"Suspicious liquidity pattern in {token_address}")
-                return True
-            
-            # 4. Check for honeypot characteristics
-            if await self.detect_honeypot(contract, token_address):
-                logger.warning(f"Honeypot characteristics detected in {token_address}")
-                return True
-            
-            # 5. Analyze trading restrictions
-            if await self.check_trading_restrictions(contract, code):
-                logger.warning(f"Suspicious trading restrictions in {token_address}")
-                return True
-            
-            # 6. Check for similar token scams
-            if await self.check_similar_token_scams(session, contract):
-                logger.warning(f"Similar token scam detected for {token_address}")
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error in scam detection for {token_address}: {str(e)}")
-            return True  # Fail safe: treat errors as potential scams
-
-    async def has_malicious_functions(self, contract: Contract, code: str) -> bool:
-        """Check for malicious functions in contract code"""
-        try:
-            # 1. Check function signatures
-            for signature in self.MALICIOUS_SIGNATURES:
-                if signature in code:
-                    # Verify if function has dangerous permissions
-                    if await self.verify_function_permissions(contract, signature):
-                        return True
-            
-            # 2. Check for malicious patterns
-            for pattern in self.MALICIOUS_PATTERNS:
-                if re.search(pattern, code):
-                    return True
-            
-            # 3. Check for hidden malicious code
-            if await self.detect_hidden_code(code):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def check_dangerous_ownership(self, contract: Contract, token_address: str) -> bool:
-        """Analyze contract ownership patterns"""
-        try:
-            # 1. Check owner's token balance
-            owner = await contract.functions.owner().call()
-            total_supply = await contract.functions.totalSupply().call()
-            owner_balance = await contract.functions.balanceOf(owner).call()
-            
-            if owner_balance / total_supply * 100 > self.MAX_OWNER_PERCENTAGE:
-                return True
-            
-            # 2. Check for proxy contracts
-            if await self._is_proxy_contract(contract):
-                if not await self._verify_proxy_implementation(contract):
-                    return True
-            
-            # 3. Check ownership renouncement
-            if await self._can_renounce_ownership(contract):
-                if not await self._is_ownership_renounced(contract):
-                    return True
-            
-            # 4. Check for timelock on critical functions
-            if not await self._has_timelock_protection(contract):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def _is_proxy_contract(self, contract: Contract) -> bool:
-        """Check if contract is a proxy contract"""
-        try:
-            code = contract.bytecode
-            # Check for common proxy patterns
-            proxy_patterns = [
-                bytes.fromhex('363d3d373d3d3d363d73'),  # EIP-1167 minimal proxy
-                bytes.fromhex('7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc')  # EIP-1967 beacon proxy
-            ]
-            return any(pattern in code for pattern in proxy_patterns)
-        except Exception:
-            return False
-
-    async def _verify_proxy_implementation(self, contract: Contract) -> bool:
-        """Verify the implementation contract of a proxy"""
-        try:
-            # Try to get implementation address using common slots/methods
-            implementation = None
-            try:
-                implementation = await contract.functions.implementation().call()
-            except:
-                try:
-                    # EIP-1967 implementation slot
-                    slot = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc'
-                    implementation = await self.web3.eth.get_storage_at(contract.address, slot)
-                except:
-                    return False
-            
-            return implementation is not None and implementation != '0x' + '0' * 40
-        except Exception:
-            return False
-
-    async def _can_renounce_ownership(self, contract: Contract) -> bool:
-        """Check if contract can renounce ownership"""
-        try:
-            return hasattr(contract.functions, 'renounceOwnership')
-        except Exception:
-            return False
-
-    async def _is_ownership_renounced(self, contract: Contract) -> bool:
-        """Check if ownership has been renounced"""
-        try:
-            owner = await contract.functions.owner().call()
-            return owner == '0x' + '0' * 40  # Check if owner is zero address
-        except Exception:
-            return False
-
-    async def _has_timelock_protection(self, contract: Contract) -> bool:
-        """Check if contract has timelock protection on critical functions"""
-        try:
-            # Check for common timelock patterns
-            code = contract.bytecode
-            timelock_patterns = [
-                bytes.fromhex('timestamp'),
-                bytes.fromhex('delay'),
-                bytes.fromhex('timelock')
-            ]
-            has_timelock_code = any(pattern in code for pattern in timelock_patterns)
-            
-            # Check for timelock contract integration
-            has_timelock_role = False
-            try:
-                timelock_role = await contract.functions.TIMELOCK_ROLE().call()
-                has_timelock_role = True
-            except:
-                pass
-                
-            return has_timelock_code or has_timelock_role
-        except Exception:
-            return False
-
-    async def analyze_liquidity_patterns(self, contract: Contract, token_address: str) -> bool:
-        """Analyze liquidity patterns for suspicious behavior"""
-        try:
-            # 1. Check LP token distribution
-            lp_holders = await self.get_lp_holders(contract)
-            if not await self.verify_lp_lock(lp_holders):
-                return True
-            
-            # 2. Check for flash loan attack vectors
-            if await self.is_vulnerable_to_flash_loans(contract):
-                return True
-            
-            # 3. Check liquidity removal capabilities
-            if await self.can_remove_liquidity_instantly(contract):
-                return True
-            
-            # 4. Monitor liquidity changes
-            if await self.detect_suspicious_liquidity_changes(contract):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def detect_honeypot(self, contract: Contract, token_address: str) -> bool:
-        """Detect honeypot characteristics"""
-        try:
-            # 1. Simulate buy transaction
-            buy_success = await self.simulate_buy_transaction(contract)
-            if not buy_success:
-                return True
-            
-            # 2. Simulate sell transaction
-            sell_success = await self.simulate_sell_transaction(contract)
-            if not sell_success:
-                return True
-            
-            # 3. Check for sell limits
-            if await self.has_hidden_sell_limits(contract):
-                return True
-            
-            # 4. Check for price manipulation
-            if await self.detect_price_manipulation(contract):
-                return True
-            
-            # 5. Check for blacklist after buy
-            if await self.check_post_buy_blacklist(contract):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def check_trading_restrictions(self, contract: Contract, code: str) -> bool:
-        """Analyze trading restrictions"""
-        try:
-            # 1. Check transfer limits
-            limits = await self.get_transfer_limits(contract)
-            if self.are_limits_suspicious(limits):
-                return True
-            
-            # 2. Check for dynamic tax changes
-            if await self.has_dynamic_taxes(contract):
-                return True
-            
-            # 3. Check for blacklist/whitelist
-            if await self.has_address_restrictions(contract):
-                return True
-            
-            # 4. Check for time-based restrictions
-            if await self.has_time_restrictions(contract):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def check_similar_token_scams(self, session: ClientSession, contract: Contract) -> bool:
-        """Check for similar token name scams"""
-        try:
-            # Get token details
-            name = await contract.functions.name().call()
-            symbol = await contract.functions.symbol().call()
-            
-            # Search for similar tokens
-            similar_tokens = await self.find_similar_tokens(session, name, symbol)
-            
-            # If too many similar tokens exist, it might be a scam
-            if len(similar_tokens) > self.MAX_SIMILAR_TOKEN_COUNT:
-                return True
-            
-            # Check if this is copying a known legitimate token
-            if await self.is_impersonating_token(name, symbol):
-                return True
-            
-            return False
-            
-        except Exception:
-            return True
-
-    async def analyze_token_history(self, session: ClientSession, token_address: str) -> Dict:
-        """Analyze historical behavior patterns of a token"""
-        try:
-            current_time = datetime.now()
-            token_data = {}
-            
-            # Fetch historical data for each interval
-            for hours in self.ANALYSIS_INTERVALS:
-                start_time = current_time - timedelta(hours=hours)
-                interval_data = await self.fetch_interval_data(session, token_address, start_time, current_time)
-                token_data[f'{hours}h'] = interval_data
-            
-            # Calculate key metrics
-            analysis = {
-                'price_volatility': self.calculate_price_volatility(token_data),
-                'volume_consistency': self.calculate_volume_consistency(token_data),
-                'holder_stability': self.analyze_holder_stability(token_data),
-                'liquidity_retention': self.calculate_liquidity_retention(token_data),
-                'trading_patterns': self.analyze_trading_patterns(token_data),
-                'whale_behavior': await self.analyze_whale_behavior(session, token_address, token_data),
-                'tax_history': await self.analyze_tax_history(session, token_address, token_data)
-            }
-            
-            # Store historical data
-            self.token_history[token_address] = {
-                'last_updated': current_time,
-                'analysis': analysis
-            }
-            
-            return analysis
-            
-        except Exception as e:
-            logger.error(f"Error analyzing token history for {token_address}: {str(e)}")
-            return None
-
-    def calculate_price_volatility(self, token_data: Dict) -> float:
-        """Calculate price volatility across different time intervals"""
-        try:
-            volatilities = []
-            
-            for interval, data in token_data.items():
-                if not data['prices']:
-                    continue
-                    
-                prices = np.array(data['prices'])
-                returns = np.diff(prices) / prices[:-1]
-                volatility = np.std(returns) * 100
-                volatilities.append(volatility)
-            
-            return np.mean(volatilities) if volatilities else float('inf')
-            
-        except Exception:
-            return float('inf')
-
-    def calculate_volume_consistency(self, token_data: Dict) -> float:
-        """Analyze trading volume consistency"""
-        try:
-            volumes = []
-            
-            for interval, data in token_data.items():
-                if not data['volumes']:
-                    continue
-                    
-                # Calculate volume trend
-                volume_trend = np.polyfit(range(len(data['volumes'])), data['volumes'], 1)[0]
-                volumes.append(volume_trend)
-            
-            avg_volume_trend = np.mean(volumes) if volumes else 0
-            return max(0, min(1, avg_volume_trend / self.MIN_VOLUME_CONSISTENCY))
-            
-        except Exception:
-            return 0
-
-    def analyze_holder_stability(self, token_data: Dict) -> Dict:
-        """Analyze holder behavior and stability"""
-        try:
-            stability_metrics = {
-                'holder_churn': 0,
-                'concentration_index': 0,
-                'retention_rate': 0
-            }
-            
-            holders_data = {}
-            for interval in token_data:
-                if isinstance(token_data[interval], dict) and 'holders' in token_data[interval]:
-                    holders_data[interval] = token_data[interval]['holders']
-            
-            for interval, holders in holders_data.items():
-                if not holders:
-                    continue
-                
-                # Calculate holder churn rate
-                holder_changes = np.diff([len(holders) for holders in holders])
-                churn_rate = np.sum(np.abs(holder_changes)) / len(holders[0])
-                
-                # Calculate holder concentration
-                total_balance = sum(float(h.get('balance', 0)) for h in holders[-1])
-                top_holders = sorted(holders[-1], key=lambda x: float(x.get('balance', 0)), reverse=True)[:10]
-                concentration = sum(float(h.get('balance', 0)) for h in top_holders) / total_balance if total_balance > 0 else 0
-                
-                # Calculate holder retention
-                initial_holders = set(h['address'] for h in holders[0])
-                final_holders = set(h['address'] for h in holders[-1])
-                retention = len(initial_holders.intersection(final_holders)) / len(initial_holders)
-                
-                stability_metrics['holder_churn'] = max(stability_metrics['holder_churn'], churn_rate)
-                stability_metrics['concentration_index'] = max(stability_metrics['concentration_index'], concentration)
-                stability_metrics['retention_rate'] = min(stability_metrics['retention_rate'], retention)
-            
-            return stability_metrics
-            
-        except Exception as e:
-            logger.error(f"Error analyzing holder stability: {str(e)}")
-            return {'holder_churn': float('inf'), 'concentration_index': float('inf'), 'retention_rate': 0}
-
-    def calculate_liquidity_retention(self, token_data: Dict) -> float:
-        """Calculate liquidity retention rate"""
-        try:
-            retentions = []
-            
-            for interval, data in token_data.items():
-                if not isinstance(data, dict) or 'liquidity' not in data:
-                    continue
-                
-                liquidity_data = data['liquidity']
-                if not liquidity_data:
-                    continue
-                
-                initial_liquidity = liquidity_data[0]
-                final_liquidity = liquidity_data[-1]
-                
-                if initial_liquidity > 0:
-                    retention = (final_liquidity / initial_liquidity) * 100
-                    retentions.append(retention)
-            
-            return np.mean(retentions) if retentions else 0
-            
-        except Exception:
-            return 0
-
-    async def analyze_whale_behavior(self, session: ClientSession, token_address: str, token_data: Dict) -> Dict:
-        """Analyze behavior of large token holders"""
-        try:
-            whale_metrics = {
-                'whale_concentration': 0,
-                'whale_trades': [],
-                'suspicious_patterns': []
-            }
-            
-            # Get current top holders
-            holders = await self.get_top_holders(session, token_address)
-            
-            # Analyze each whale's trading pattern
-            for holder in holders[:10]:  # Focus on top 10 holders
-                trades = await self.get_holder_trades(session, token_address, holder['address'])
-                
-                # Analyze trade timing and sizes
-                trade_analysis = self.analyze_trade_patterns(trades)
-                
-                if trade_analysis.get('suspicious', False):
-                    whale_metrics['suspicious_patterns'].append({
-                        'holder': holder['address'],
-                        'pattern': trade_analysis.get('pattern', 'unknown')
-                    })
-                
-                whale_metrics['whale_trades'].extend(trade_analysis['trades'])
-            
-            # Calculate overall whale concentration
-            total_supply = await self.get_total_supply(token_address)
-            whale_balance = sum(h['balance'] for h in holders[:10])
-            whale_metrics['whale_concentration'] = (whale_balance / total_supply) * 100
-            
-            return whale_metrics
-            
-        except Exception as e:
-            logger.error(f"Error analyzing whale behavior: {str(e)}")
-            return {'whale_concentration': 0, 'whale_trades': [], 'suspicious_patterns': []}
-
-    async def analyze_tax_history(self, session: ClientSession, token_address: str, token_data: Dict) -> Dict:
-        """Analyze historical changes in token taxes/fees"""
-        try:
-            tax_history = {
-                'buy_tax': [],
-                'sell_tax': [],
-                'transfer_tax': [],
-                'tax_changes': []
-            }
-            
-            # Analyze tax changes over time
-            for interval, data in token_data.items():
-                if not data['transactions']:
-                    continue
-                
-                if not isinstance(data, dict) or 'transactions' not in data:
-                    continue
-                
-                transactions = data.get('transactions', [])
-                if not transactions:
-                    continue
-                
-                # Calculate effective tax rates from transactions
-                buy_taxes = self.calculate_effective_tax(transactions, 'buy')
-                sell_taxes = self.calculate_effective_tax(transactions, 'sell')
-                transfer_taxes = self.calculate_effective_tax(transactions, 'transfer')
-                
-                tax_history['buy_tax'].append(np.mean(buy_taxes))
-                tax_history['sell_tax'].append(np.mean(sell_taxes))
-                tax_history['transfer_tax'].append(np.mean(transfer_taxes))
-                
-                # Detect significant tax changes
-                if len(tax_history['sell_tax']) > 1:
-                    tax_change = tax_history['sell_tax'][-1] / tax_history['sell_tax'][0]
-                    if tax_change > self.MAX_SELL_TAX_INCREASE:
-                        tax_history['tax_changes'].append({
-                            'timestamp': data['timestamp'],
-                            'type': 'sell_tax_increase',
-                            'change_factor': tax_change
-                        })
-            
-            return tax_history
-            
-        except Exception as e:
-            logger.error(f"Error analyzing tax history: {str(e)}")
-            return {'buy_tax': [], 'sell_tax': [], 'transfer_tax': [], 'tax_changes': []}
-
-    async def validate_token_with_liquidity(
-        self, 
-        session: ClientSession, 
-        token: Dict[str, Any], 
-        pair: Optional[Dict[str, Any]] = None
-    ) -> bool:
-        """Comprehensive token validation with liquidity checks"""
-        try:
-            # Basic validation
-            if not self.validate_token_basics(token):
-                return False
-
-            # Contract validation
-            if not await self.validate_contract(session, token['address']):
-                return False
-
-            # Security checks
-            if await self.detect_scam_patterns(session, token['address']):
-                return False
-
-            # Historical analysis
-            history = await self.analyze_token_history(session, token['address'])
-            if not history or history.get('risk_score', 1.0) > 0.7:
-                return False
-
-            # Liquidity checks
-            if pair and not await self.validate_liquidity(session, token, pair):
-                return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error in validate_token_with_liquidity: {str(e)}")
-            return False
-
-    def validate_token_basics(self, token: Dict) -> bool:
-        """Perform basic token validation checks"""
-        try:
-            # Must have required fields
-            required_fields = ['address', 'symbol', 'decimals', 'name']
-            if not all(field in token for field in required_fields):
-                return False
-                
-            # Symbol length check
-            if not (2 <= len(token['symbol']) <= 12):
-                return False
-                
-            # Decimal range check
-            if not (0 <= int(token['decimals']) <= 18):
-                return False
-                
-            # Name length check
-            if not (2 <= len(token['name']) <= 64):
-                return False
-                
-            # Blacklist check
-            blacklist = ['TEST', 'SCAM', 'HONEY', 'FAKE', 'MOCK', 'SAMPLE']
-            if any(word in token['symbol'].upper() for word in blacklist):
-                return False
-                
-            # Address format check
-            if not web3.isAddress(token['address']):
-                return False
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error in basic validation: {str(e)}")
-            return False
-
-    async def validate_liquidity(self, session: ClientSession, token: Dict[str, Any], pair: Dict[str, Any]) -> bool:
-        """Validate liquidity requirements for a token pair"""
-        try:
-            # Check minimum liquidity requirement
-            if pair.get('liquidity', 0) < self.MIN_LIQUIDITY_USD:
-                logger.warning(f"Insufficient liquidity for {token.get('symbol')}")
-                return False
-                
-            # Check liquidity distribution
-            liquidity_data = await self._get_liquidity_data(session, pair['address'])
-            if not self._validate_liquidity_distribution(liquidity_data):
-                return False
-                
-            # Check liquidity stability
-            if not await self._check_liquidity_stability(session, pair['address']):
-                return False
-                
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error validating liquidity: {str(e)}")
-            return False
-            
-    async def _get_liquidity_data(self, session: ClientSession, pair_address: str) -> Dict:
-        """Get detailed liquidity data for a pair"""
-        # Implementation would fetch liquidity data from DEX
-        return {'total_liquidity': 0, 'distribution': []}
-        
-    def _validate_liquidity_distribution(self, liquidity_data: Dict) -> bool:
-        """Validate liquidity distribution is healthy"""
-        # Implementation would check liquidity concentration
-        return True
-        
-    async def _check_liquidity_stability(self, session: ClientSession, pair_address: str) -> bool:
-        """Check if liquidity is stable over time"""
-        # Implementation would check liquidity history
-        return True
-
-    async def is_contract_verified(self, session: ClientSession, token_address: str) -> bool:
-        """Check if contract is verified on Basescan"""
-        try:
-            # Basescan API endpoint
-            api_key = os.getenv('BASESCAN_API_KEY')
-            if not api_key:
-                return False
-                
-            url = f"https://api.basescan.org/api?module=contract&action=getabi&address={token_address}&apikey={api_key}"
-            
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return False
-                    
-                data = await response.json()
-                return data.get('status') == '1' and data.get('result') != ''
-                
-        except Exception as e:
-            logger.error(f"Error checking contract verification: {str(e)}")
-            return False
-
-    async def get_contract_abi(self, session: ClientSession, token_address: str) -> List[Dict]:
-        """Get contract ABI from Basescan"""
-        try:
-            api_key = os.getenv('BASESCAN_API_KEY')
-            if not api_key:
-                return ERC20_ABI  # Fallback to standard ERC20 ABI
-                
-            url = f"https://api.basescan.org/api?module=contract&action=getabi&address={token_address}&apikey={api_key}"
-            
-            async with session.get(url) as response:
-                if response.status != 200:
-                    return ERC20_ABI
-                    
-                data = await response.json()
-                if data.get('status') == '1' and data.get('result'):
-                    return json.loads(data['result'])
-                return ERC20_ABI
-                
-        except Exception as e:
-            logger.error(f"Error fetching contract ABI: {str(e)}")
-            return ERC20_ABI
+    def set_contract_address(self, address: str) -> None:
+        """Set the contract address for analysis"""
+        self.contract_address = address
 
     async def verify_function_permissions(self, contract: Contract, signature: str) -> bool:
         """Verify if a function has dangerous permissions"""
@@ -1874,202 +246,174 @@ class TokenDiscovery:
             logger.error(f"Error detecting hidden code: {str(e)}")
             return True  # Fail safe: treat errors as potential hidden code
 
-    async def get_lp_holders(self, contract: Contract) -> List[Dict]:
-        """Get list of LP token holders"""
-        try:
-            # Get total supply
-            total_supply = await contract.functions.totalSupply().call()
-            # Get top holders (example implementation)
-            return [{'address': '0x0', 'balance': total_supply}]
-        except Exception as e:
-            logger.error(f"Error getting LP holders: {str(e)}")
-            return []
-
-    async def verify_lp_lock(self, lp_holders: List[Dict]) -> bool:
-        """Verify if LP tokens are locked"""
-        try:
-            # Check if majority of LP tokens are locked
-            return True  # Implement actual verification logic
-        except Exception:
-            return False
-
-    async def is_vulnerable_to_flash_loans(self, contract: Contract) -> bool:
-        """Check if contract is vulnerable to flash loan attacks"""
-        try:
-            # Implement flash loan vulnerability check
-            return False
-        except Exception:
-            return True
-
-    async def can_remove_liquidity_instantly(self, contract: Contract) -> bool:
-        """Check if liquidity can be removed instantly"""
-        try:
-            # Implement liquidity removal check
-            return False
-        except Exception:
-            return True
-
-    async def detect_suspicious_liquidity_changes(self, contract: Contract) -> bool:
-        """Monitor for suspicious liquidity changes"""
-        try:
-            # Implement liquidity change monitoring
-            return False
-        except Exception:
-            return True
-
-    async def simulate_buy_transaction(self, contract: Contract) -> bool:
-        """Simulate a buy transaction"""
-        try:
-            # Implement buy simulation
-            return True
-        except Exception:
-            return False
-
-    async def simulate_sell_transaction(self, contract: Contract) -> bool:
-        """Simulate a sell transaction"""
-        try:
-            # Implement sell simulation
-            return True
-        except Exception:
-            return False
-
-    async def has_hidden_sell_limits(self, contract: Contract) -> bool:
-        """Check for hidden sell limits"""
-        try:
-            # Implement sell limit detection
-            return False
-        except Exception:
-            return True
-
-    async def detect_price_manipulation(self, contract: Contract) -> bool:
-        """Check for price manipulation capabilities"""
-        try:
-            # Implement price manipulation detection
-            return False
-        except Exception:
-            return True
-
-    async def check_post_buy_blacklist(self, contract: Contract) -> bool:
-        """Check for post-buy blacklisting"""
-        try:
-            # Implement post-buy blacklist check
-            return False
-        except Exception:
-            return True
-
-    async def get_transfer_limits(self, contract: Contract) -> Dict:
+    async def get_transfer_limits(self, contract: Contract) -> Dict[str, int]:
         """Get transfer limits from contract"""
         try:
-            # Implement transfer limit retrieval
-            return {'max_transfer': 0, 'min_transfer': 0}
-        except Exception:
+            limits = {}
+            
+            # Check common limit functions
+            limit_functions = [
+                'maxTransferAmount',
+                'maxTxAmount',
+                'maxTransfer',
+                'transferLimit'
+            ]
+            
+            for func_name in limit_functions:
+                try:
+                    if hasattr(contract.functions, func_name):
+                        limit = await contract.functions[func_name]().call()
+                        limits[func_name] = int(limit)
+                except:
+                    continue
+                    
+            return limits
+            
+        except Exception as e:
+            logger.error(f"Error getting transfer limits: {str(e)}")
             return {}
 
-    def are_limits_suspicious(self, limits: Dict) -> bool:
+    def are_limits_suspicious(self, limits: Dict[str, int]) -> bool:
         """Check if transfer limits are suspicious"""
         try:
-            # Implement limit analysis
+            if not limits:
+                return False
+                
+            total_supply = self.web3.eth.contract(
+                address=self.web3.to_checksum_address(self.contract_address),
+                abi=self.ERC20_ABI
+            ).functions.totalSupply().call()
+            
+            # Check if any limit is too restrictive
+            for limit in limits.values():
+                if limit < total_supply * 0.001:  # Less than 0.1% of total supply
+                    return True
+                    
             return False
-        except Exception:
+            
+        except Exception as e:
+            logger.error(f"Error checking transfer limits: {str(e)}")
             return True
 
     async def has_dynamic_taxes(self, contract: Contract) -> bool:
         """Check for dynamic tax mechanisms"""
         try:
-            # Implement dynamic tax detection
+            # Check for tax-related functions
+            tax_functions = [
+                'setTaxFee',
+                'setFee',
+                'updateFee',
+                'setTaxRate'
+            ]
+            
+            for func_name in tax_functions:
+                if hasattr(contract.functions, func_name):
+                    return True
+                    
             return False
-        except Exception:
+            
+        except Exception as e:
+            logger.error(f"Error checking dynamic taxes: {str(e)}")
             return True
 
     async def has_address_restrictions(self, contract: Contract) -> bool:
         """Check for address-based restrictions"""
         try:
-            # Implement address restriction check
+            # Check for restriction-related functions
+            restriction_functions = [
+                'blacklist',
+                'whitelist',
+                'excludeFromFee',
+                'setExcluded'
+            ]
+            
+            for func_name in restriction_functions:
+                if hasattr(contract.functions, func_name):
+                    return True
+                    
             return False
-        except Exception:
+            
+        except Exception as e:
+            logger.error(f"Error checking address restrictions: {str(e)}")
             return True
 
     async def has_time_restrictions(self, contract: Contract) -> bool:
         """Check for time-based restrictions"""
         try:
-            # Implement time restriction check
+            # Check for time restriction functions
+            time_functions = [
+                'tradingEnabled',
+                'enableTrading',
+                'setTradingStart',
+                'lockTime'
+            ]
+            
+            for func_name in time_functions:
+                if hasattr(contract.functions, func_name):
+                    return True
+                    
             return False
-        except Exception:
+            
+        except Exception as e:
+            logger.error(f"Error checking time restrictions: {str(e)}")
             return True
 
-    async def find_similar_tokens(self, session: ClientSession, name: str, symbol: str) -> List[Dict]:
-        """Find similar tokens by name or symbol"""
+    async def has_malicious_functions(self, contract: Contract, code: str) -> bool:
+        """Check for malicious functions in contract code"""
         try:
-            # Implement similar token search
-            return []
-        except Exception:
-            return []
-
-    # Add missing constant
-    MAX_SIMILAR_TOKEN_COUNT = 5
-    MIN_LIQUIDITY_USD = 10000  # $10k minimum liquidity
-
-    async def is_impersonating_token(self, name: str, symbol: str) -> bool:
-        """Check if token is impersonating a known token"""
-        try:
-            # Implement impersonation check
+            # Convert HexBytes to string if needed
+            code_str = code.hex() if isinstance(code, HexBytes) else code
+            
+            # Check function signatures
+            for signature in self.MALICIOUS_SIGNATURES:
+                if signature in code_str:
+                    # Verify if function has dangerous permissions
+                    if await self.verify_function_permissions(contract, signature):
+                        return True
+            
+            # Check for malicious patterns
+            for pattern in self.MALICIOUS_PATTERNS:
+                if re.search(pattern, code_str):
+                    return True
+            
+            # Check for hidden malicious code
+            if await self.detect_hidden_code(code_str):
+                return True
+            
             return False
-        except Exception:
+            
+        except Exception as e:
+            logger.error(f"Error checking malicious functions: {str(e)}")
             return True
 
-    async def fetch_interval_data(self, session: ClientSession, token_address: str, start_time: datetime, end_time: datetime) -> Dict:
-        """Fetch historical data for a specific interval"""
+    async def check_trading_restrictions(self, contract: Contract, code: str) -> bool:
+        """Analyze trading restrictions"""
         try:
-            # Implement historical data fetching
-            return {'prices': [], 'volumes': [], 'holders': [], 'transactions': []}
-        except Exception:
-            return {}
-
-    async def analyze_trading_patterns(self, token_data: Dict) -> Dict:
-        """Analyze trading patterns"""
-        try:
-            # Implement trading pattern analysis
-            return {'suspicious': False, 'pattern': None}
-        except Exception:
-            return {'suspicious': True, 'pattern': 'error'}
-
-    async def get_top_holders(self, session: ClientSession, token_address: str) -> List[Dict]:
-        """Get top token holders"""
-        try:
-            # Implement top holder retrieval
-            return []
-        except Exception:
-            return []
-
-    async def get_holder_trades(self, session: ClientSession, token_address: str, holder_address: str) -> List[Dict]:
-        """Get trades for a specific holder"""
-        try:
-            # Implement holder trade retrieval
-            return []
-        except Exception:
-            return []
-
-    async def get_total_supply(self, token_address: str) -> int:
-        """Get total token supply"""
-        try:
-            contract = self.web3.eth.contract(
-                address=Web3.to_checksum_address(token_address),
-                abi=ERC20_ABI
-            )
-            return await contract.functions.totalSupply().call()
-        except Exception:
-            return 0
-
-    def calculate_effective_tax(self, transactions: List[Dict], tx_type: str) -> List[float]:
-        """Calculate effective tax rate from transactions"""
-        try:
-            # Implement tax calculation
-            return [0.0]
-        except Exception:
-            return [0.0]
-
-# Initialize token discovery
-token_discovery = TokenDiscovery() 
+            # Convert HexBytes to string if needed
+            code_str = code.hex() if isinstance(code, HexBytes) else code
+            
+            # Check transfer limits
+            limits = await self.get_transfer_limits(contract)
+            if self.are_limits_suspicious(limits):
+                return True
+            
+            # Check for dynamic tax changes
+            if await self.has_dynamic_taxes(contract):
+                return True
+            
+            # Check for blacklist/whitelist
+            if await self.has_address_restrictions(contract):
+                return True
+            
+            # Check for time-based restrictions
+            if await self.has_time_restrictions(contract):
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking trading restrictions: {str(e)}")
+            return True
 
 class ArbitrageStrategy:
     def __init__(self):
@@ -3036,3 +1380,18 @@ class ValidationError(ArbitrageError):
 class ExecutionError(ArbitrageError):
     """Execution related errors"""
     pass
+
+CURVE_ROUTER_ABI = [
+    {"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"internalType":"address[]","name":"route","type":"address[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"exchange","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"payable","type":"function"},
+    {"inputs":[{"internalType":"uint256[2]","name":"amounts","type":"uint256[2]"},{"internalType":"uint256","name":"min_mint_amount","type":"uint256"}],"name":"add_liquidity","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"uint256","name":"_token_amount","type":"uint256"},{"internalType":"uint256","name":"min_amount","type":"uint256"}],"name":"remove_liquidity_one_coin","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"uint256","name":"i","type":"uint256"},{"internalType":"uint256","name":"j","type":"uint256"},{"internalType":"uint256","name":"dx","type":"uint256"},{"internalType":"uint256","name":"min_dy","type":"uint256"}],"name":"exchange","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"payable","type":"function"}
+]
+
+MORPHO_ROUTER_ABI = [
+    {"inputs":[{"internalType":"address","name":"loanToken","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"address","name":"onBehalfOf","type":"address"},{"internalType":"uint16","name":"referralCode","type":"uint16"}],"name":"supply","outputs":[],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"address","name":"onBehalfOf","type":"address"}],"name":"withdraw","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"address","name":"onBehalfOf","type":"address"},{"internalType":"uint16","name":"referralCode","type":"uint16"}],"name":"borrow","outputs":[],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"internalType":"address","name":"onBehalfOf","type":"address"}],"name":"repay","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
+    {"inputs":[{"internalType":"address","name":"receiverAddress","type":"address"},{"internalType":"address[]","name":"assets","type":"address[]"},{"internalType":"uint256[]","name":"amounts","type":"uint256[]"},{"internalType":"uint256[]","name":"modes","type":"uint256[]"},{"internalType":"address","name":"onBehalfOf","type":"address"},{"internalType":"bytes","name":"params","type":"bytes"},{"internalType":"uint16","name":"referralCode","type":"uint16"}],"name":"flashLoan","outputs":[],"stateMutability":"nonpayable","type":"function"}
+]

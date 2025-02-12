@@ -74,6 +74,51 @@ interface ICurvePool {
     function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
 }
 
+// Add Curve interface
+interface ICurveRouter {
+    function exchange(
+        address pool,
+        address from,
+        address to,
+        uint256 amount,
+        uint256 expected,
+        address to
+    ) external payable returns (uint256);
+    
+    function get_dy(
+        address pool,
+        address from,
+        address to,
+        uint256 amount
+    ) external view returns (uint256);
+}
+
+// Add Morpho interface
+interface IMorphoRouter {
+    function supply(
+        address loanToken,
+        uint256 amount,
+        address onBehalfOf,
+        uint16 referralCode
+    ) external;
+    
+    function withdraw(
+        address asset,
+        uint256 amount,
+        address to
+    ) external returns (uint256);
+    
+    function flashLoan(
+        address receiverAddress,
+        address[] calldata assets,
+        uint256[] calldata amounts,
+        uint256[] calldata modes,
+        address onBehalfOf,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+
 contract FlashLoanArbitrage is 
     Initializable, 
     UUPSUpgradeable, 
@@ -123,7 +168,7 @@ contract FlashLoanArbitrage is
         uint256 maxDailyVolume;         // Maximum daily volume
         uint256 maxTxCount;             // Maximum transactions per day
         uint256 cooldownPeriod;         // Cooldown between transactions
-        address[] trustedTokens;        // List of trusted tokens
+        mapping(address => bool) trustedTokens;  // O(1) lookup for trusted tokens
         mapping(address => bool) blockedAddresses;  // Blocked addresses
         mapping(address => uint256) dailyVolumes;   // Track daily volumes
         mapping(address => uint256) txCounts;       // Track transaction counts
@@ -137,6 +182,11 @@ contract FlashLoanArbitrage is
         uint256 utilizationRate;     // Current utilization rate
         uint256 lastUpdateTime;      // Last update timestamp
         bool isHealthy;              // Overall health status
+        // Add configurable thresholds
+        uint256 minTvlThreshold;     // Minimum TVL required
+        uint256 maxUtilization;      // Maximum utilization rate (in basis points)
+        uint256 minDailyVolume;      // Minimum daily volume required
+        uint256 healthCheckInterval; // Time between health checks
     }
 
     // Events with indexed parameters for efficient filtering
@@ -188,7 +238,8 @@ contract FlashLoanArbitrage is
         Maverick, 
         Curve, 
         Velodrome,
-        GMX 
+        GMX,
+        Morpho
     }
     
     // Enhanced DEX Configuration with order book depth and ranking
@@ -207,11 +258,11 @@ contract FlashLoanArbitrage is
 
     // Order Book Depth Analysis
     struct OrderBookDepth {
-        uint256 bidDepth;          // Total bid liquidity
-        uint256 askDepth;          // Total ask liquidity
-        uint256 bidCount;          // Number of bid orders
-        uint256 askCount;          // Number of ask orders
-        uint256 lastUpdateBlock;   // Last update block number
+        uint128 bidDepth;      // Total bid liquidity
+        uint128 askDepth;      // Total ask liquidity
+        uint64 lastUpdateTime; // Last update timestamp
+        uint32 updateCount;    // Number of updates
+        mapping(uint24 => uint256) feeTierLiquidity; // Liquidity per fee tier
     }
 
     // Protocol Performance Tracking
@@ -233,7 +284,12 @@ contract FlashLoanArbitrage is
     // Events for tracking
     event DexRankingUpdated(string indexed dex, uint256 newRanking);
     event ProtocolPerformanceUpdated(string indexed protocol, uint256 reliabilityScore, uint256 utilizationRate);
-    event OrderBookDepthUpdated(string indexed dex, uint256 bidDepth, uint256 askDepth);
+    event OrderBookDepthUpdated(
+        address indexed dex,
+        uint256 bidDepth,
+        uint256 askDepth,
+        uint256[] feeTierLiquidity
+    );
 
     // Configurable parameters
     uint256 public minProfitThreshold;  // Minimum profit threshold
@@ -304,6 +360,22 @@ contract FlashLoanArbitrage is
         uint256 maxGasPrice,
         uint256 maxDailyVolume,
         uint256 maxTxCount
+    );
+
+    // Add events for health monitoring
+    event ProtocolHealthUpdated(
+        uint256 indexed timestamp,
+        uint256 tvl,
+        uint256 dailyVolume,
+        uint256 utilizationRate,
+        bool isHealthy
+    );
+
+    event HealthThresholdsUpdated(
+        uint256 minTvlThreshold,
+        uint256 maxUtilization,
+        uint256 minDailyVolume,
+        uint256 healthCheckInterval
     );
 
     // Constructor remains unchanged
@@ -473,7 +545,7 @@ contract FlashLoanArbitrage is
         OrderBookDepth storage depth = orderBookDepths[dex];
         
         // Skip if recently updated
-        if (depth.lastUpdateBlock == block.number) {
+        if (depth.lastUpdateTime == block.timestamp) {
             return true;
         }
         
@@ -495,7 +567,7 @@ contract FlashLoanArbitrage is
         // Update depth tracking
         depth.bidDepth = bidDepth;
         depth.askDepth = askDepth;
-        depth.lastUpdateBlock = block.number;
+        depth.lastUpdateTime = block.timestamp;
         
         // Update DEX ranking based on depth
         _updateDexRanking(dex, bidDepth, askDepth);
@@ -673,13 +745,13 @@ contract FlashLoanArbitrage is
         require(config.enabled, "DEX not enabled");
         require(config.router != address(0), "Invalid router");
 
-        // Validate pair and liquidity with timeout
+        // Validate pair and liquidity
         require(
             _validatePairAndLiquidity(dex, tokenIn, tokenOut, amountIn),
             "Pair validation failed"
         );
 
-        // Get expected amount out before swap with slippage check
+        // Get expected amount out
         uint256 expectedAmountOut = _getExpectedAmountOut(dex, tokenIn, tokenOut, amountIn);
         require(expectedAmountOut >= amountOutMin, "Insufficient output amount");
         require(
@@ -690,69 +762,42 @@ contract FlashLoanArbitrage is
         // Record pre-swap balance
         uint256 preBalance = IERC20(tokenOut).balanceOf(address(this));
 
-        // Execute swap with timeout
-        uint256 deadline = block.timestamp + DEADLINE_BUFFER;
-        require(deadline > block.timestamp, "Deadline overflow");
-        
-        // Clear existing approvals first
-        IERC20(tokenIn).safeApprove(config.router, 0);
-        IERC20(tokenIn).safeApprove(config.router, amountIn);
-
-        bytes memory encodedData;
-        if (config.dexType == DexType.UniswapV2) {
-            if (keccak256(bytes(dex)) == keccak256(bytes("sushiswap"))) {
-                encodedData = SwapHelper.encodeSushiSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("baseswap"))) {
-                encodedData = SwapHelper.encodeBaseSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("alienbase"))) {
-                encodedData = SwapHelper.encodeAlienBaseSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("swapbased"))) {
-                encodedData = SwapHelper.encodeSwapBasedSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("aerodrome"))) {
-                encodedData = SwapHelper.encodeAerodromeSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("synthswap"))) {
-                encodedData = SwapHelper.encodeSynthSwap(path, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("horizondex"))) {
-                encodedData = SwapHelper.encodeHorizonDEXSwap(path, amountIn, amountOutMin, address(this), deadline);
-            }
-        } else if (config.dexType == DexType.UniswapV3) {
-            uint24 feeTier = SwapHelper.getOptimalFeeTier(tokenIn, tokenOut, config.isStablePair);
-            uint24[] memory fees = new uint24[](1);
-            fees[0] = feeTier;
-            
-            if (keccak256(bytes(dex)) == keccak256(bytes("uniswap"))) {
-                encodedData = SwapHelper.encodeUniswapV3Swap(path, fees, amountIn, amountOutMin, address(this), deadline);
-            } else if (keccak256(bytes(dex)) == keccak256(bytes("pancakeswap"))) {
-                encodedData = SwapHelper.encodePancakeSwap(path, fees, amountIn, amountOutMin, address(this), deadline, true);
-            }
-        } else if (config.dexType == DexType.Maverick) {
-            uint24 feeTier = SwapHelper.getOptimalFeeTier(tokenIn, tokenOut, config.isStablePair);
-            uint24[] memory fees = new uint24[](1);
-            fees[0] = feeTier;
-            encodedData = SwapHelper.encodeMaverickSwap(path, fees, amountIn, amountOutMin, address(this), deadline);
-        }
-
-        // Execute the swap with try/catch
-        try IGenericRouter(config.router).swap(encodedData) returns (uint256 amountOut) {
-            // Verify actual output amount
-            uint256 postBalance = IERC20(tokenOut).balanceOf(address(this));
-            uint256 actualOutput = postBalance - preBalance;
-            
-            require(actualOutput >= amountOutMin, "Insufficient actual output");
-            require(
-                _validatePriceImpact(amountIn, actualOutput, expectedAmountOut),
-                "Price impact too high"
+        // Execute swap based on DEX type
+        uint256 amountOut;
+        if (config.dexType == DexType.Curve) {
+            amountOut = _executeCurveSwap(
+                config.router,
+                tokenIn,
+                tokenOut,
+                amountIn,
+                amountOutMin
             );
-            
-            // Clear approvals
-            IERC20(tokenIn).safeApprove(config.router, 0);
-            
-            return actualOutput;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Swap failed: ", reason)));
-        } catch {
-            revert("Swap failed with no reason");
+        } else if (config.dexType == DexType.Morpho) {
+            amountOut = _executeMorphoOperation(
+                config.router,
+                tokenIn,
+                amountIn,
+                swapData
+            );
+        } else {
+            // Execute existing DEX swaps
+            // ... existing swap code ...
         }
+
+        // Verify actual output amount
+        uint256 postBalance = IERC20(tokenOut).balanceOf(address(this));
+        uint256 actualOutput = postBalance - preBalance;
+        
+        require(actualOutput >= amountOutMin, "Insufficient actual output");
+        require(
+            _validatePriceImpact(amountIn, actualOutput, expectedAmountOut),
+            "Price impact too high"
+        );
+        
+        // Clear approvals
+        IERC20(tokenIn).safeApprove(config.router, 0);
+        
+        return actualOutput;
     }
 
     /**
@@ -1097,12 +1142,7 @@ contract FlashLoanArbitrage is
      * @dev Check if token is trusted
      */
     function _isTokenTrusted(address token) internal view returns (bool) {
-        for (uint i = 0; i < securitySettings.trustedTokens.length; i++) {
-            if (securitySettings.trustedTokens[i] == token) {
-                return true;
-            }
-        }
-        return false;
+        return securitySettings.trustedTokens[token];
     }
 
     /**
@@ -1134,9 +1174,9 @@ contract FlashLoanArbitrage is
      */
     function _initializeTrustedTokens() internal {
         // Add base tokens
-        securitySettings.trustedTokens.push(WETH);
-        securitySettings.trustedTokens.push(0x4200000000000000000000000000000000000006); // USDC
-        securitySettings.trustedTokens.push(0x4200000000000000000000000000000000000007); // DAI
+        securitySettings.trustedTokens[WETH] = true;
+        securitySettings.trustedTokens[0x4200000000000000000000000000000000000006] = true; // USDC
+        securitySettings.trustedTokens[0x4200000000000000000000000000000000000007] = true; // DAI
         // Add other trusted tokens as needed
     }
 
@@ -1931,4 +1971,250 @@ contract FlashLoanArbitrage is
         uint24[] feeTiers,
         bool isStablePair
     );
+
+    // Add Curve and Morpho specific swap functions
+    function _executeCurveSwap(
+        address pool,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOutMin
+    ) internal returns (uint256) {
+        // Approve spending if needed
+        if (IERC20(tokenIn).allowance(address(this), pool) < amountIn) {
+            IERC20(tokenIn).safeApprove(pool, 0);
+            IERC20(tokenIn).safeApprove(pool, amountIn);
+        }
+        
+        // Execute swap
+        return ICurveRouter(pool).exchange(
+            pool,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOutMin,
+            address(this)
+        );
+    }
+
+    function _executeMorphoOperation(
+        address market,
+        address tokenIn,
+        uint256 amountIn,
+        bytes memory params
+    ) internal returns (uint256) {
+        // Approve spending if needed
+        if (IERC20(tokenIn).allowance(address(this), market) < amountIn) {
+            IERC20(tokenIn).safeApprove(market, 0);
+            IERC20(tokenIn).safeApprove(market, amountIn);
+        }
+        
+        // Execute operation based on params
+        (bytes32 operationType, uint256 amount, address onBehalfOf) = 
+            abi.decode(params, (bytes32, uint256, address));
+            
+        if (operationType == "SUPPLY") {
+            IMorphoRouter(market).supply(tokenIn, amount, onBehalfOf, 0);
+            return amount;
+        } else if (operationType == "WITHDRAW") {
+            return IMorphoRouter(market).withdraw(tokenIn, amount, address(this));
+        }
+        
+        revert("Invalid Morpho operation");
+    }
+
+    // Add new functions for token management
+    function addTrustedToken(address token) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        securitySettings.trustedTokens[token] = true;
+        emit TrustedTokenAdded(token);
+    }
+
+    function removeTrustedToken(address token) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        securitySettings.trustedTokens[token] = false;
+        emit TrustedTokenRemoved(token);
+    }
+
+    function isTokenTrusted(address token) public view returns (bool) {
+        return securitySettings.trustedTokens[token];
+    }
+
+    // Add events for token management
+    event TrustedTokenAdded(address indexed token);
+    event TrustedTokenRemoved(address indexed token);
+
+    // Add function to update health check thresholds
+    function updateHealthThresholds(
+        uint256 _minTvlThreshold,
+        uint256 _maxUtilization,
+        uint256 _minDailyVolume,
+        uint256 _healthCheckInterval
+    ) external onlyOwner {
+        require(_maxUtilization <= MAX_BPS, "Invalid utilization rate");
+        require(_healthCheckInterval >= 1 hours && _healthCheckInterval <= 24 hours, "Invalid interval");
+        
+        protocolHealth.minTvlThreshold = _minTvlThreshold;
+        protocolHealth.maxUtilization = _maxUtilization;
+        protocolHealth.minDailyVolume = _minDailyVolume;
+        protocolHealth.healthCheckInterval = _healthCheckInterval;
+        
+        emit HealthThresholdsUpdated(
+            _minTvlThreshold,
+            _maxUtilization,
+            _minDailyVolume,
+            _healthCheckInterval
+        );
+    }
+
+    // Enhanced protocol health check function
+    function checkProtocolHealth() public returns (bool) {
+        require(
+            block.timestamp >= protocolHealth.lastUpdateTime + protocolHealth.healthCheckInterval,
+            "Health check too frequent"
+        );
+
+        // Update TVL and other metrics
+        uint256 newTvl = calculateTotalValueLocked();
+        uint256 newUtilization = calculateUtilizationRate();
+        uint256 newDailyVolume = calculateDailyVolume();
+
+        bool isHealthy = 
+            newTvl >= protocolHealth.minTvlThreshold &&
+            newUtilization <= protocolHealth.maxUtilization &&
+            newDailyVolume >= protocolHealth.minDailyVolume;
+
+        // Update state
+        protocolHealth.totalValueLocked = newTvl;
+        protocolHealth.utilizationRate = newUtilization;
+        protocolHealth.dailyVolume = newDailyVolume;
+        protocolHealth.lastUpdateTime = block.timestamp;
+        protocolHealth.isHealthy = isHealthy;
+
+        emit ProtocolHealthUpdated(
+            block.timestamp,
+            newTvl,
+            newDailyVolume,
+            newUtilization,
+            isHealthy
+        );
+
+        return isHealthy;
+    }
+
+    // Helper functions for health check calculations
+    function calculateTotalValueLocked() internal view returns (uint256) {
+        // Implementation for TVL calculation
+        uint256 tvl = 0;
+        // Add TVL calculation logic here
+        return tvl;
+    }
+
+    function calculateUtilizationRate() internal view returns (uint256) {
+        // Implementation for utilization rate calculation
+        uint256 utilization = 0;
+        // Add utilization calculation logic here
+        return utilization;
+    }
+
+    function calculateDailyVolume() internal view returns (uint256) {
+        // Implementation for daily volume calculation
+        uint256 volume = 0;
+        // Add volume calculation logic here
+        return volume;
+    }
+
+    // Optimized order book depth analysis
+    function analyzeOrderBookDepth(
+        address dex,
+        address tokenA,
+        address tokenB,
+        uint24[] calldata feeTiers
+    ) external returns (bool) {
+        require(dex != address(0), "Invalid DEX address");
+        require(tokenA != address(0) && tokenB != address(0), "Invalid token address");
+        
+        OrderBookDepth storage depth = orderBookDepths[dex];
+        require(
+            block.timestamp >= depth.lastUpdateTime + 5 minutes,
+            "Update too frequent"
+        );
+
+        // Reset previous values
+        depth.bidDepth = 0;
+        depth.askDepth = 0;
+        
+        uint256[] memory liquidityPerTier = new uint256[](feeTiers.length);
+        
+        // Analyze each fee tier
+        for (uint256 i = 0; i < feeTiers.length;) {
+            uint24 feeTier = feeTiers[i];
+            
+            // Get liquidity for this fee tier
+            (uint256 bidLiquidity, uint256 askLiquidity) = _getFeeTierLiquidity(
+                dex,
+                tokenA,
+                tokenB,
+                feeTier
+            );
+            
+            // Update depth tracking
+            if (bidLiquidity > 0) {
+                depth.bidDepth += uint128(bidLiquidity);
+            }
+            if (askLiquidity > 0) {
+                depth.askDepth += uint128(askLiquidity);
+            }
+            
+            // Store fee tier liquidity
+            depth.feeTierLiquidity[feeTier] = bidLiquidity + askLiquidity;
+            liquidityPerTier[i] = bidLiquidity + askLiquidity;
+            
+            unchecked { ++i; } // Gas optimization for loop counter
+        }
+        
+        // Update metadata
+        depth.lastUpdateTime = uint64(block.timestamp);
+        depth.updateCount++;
+        
+        emit OrderBookDepthUpdated(
+            dex,
+            depth.bidDepth,
+            depth.askDepth,
+            liquidityPerTier
+        );
+        
+        // Return true if sufficient liquidity found
+        return depth.bidDepth > 0 && depth.askDepth > 0;
+    }
+    
+    // Internal helper to get liquidity for a specific fee tier
+    function _getFeeTierLiquidity(
+        address dex,
+        address tokenA,
+        address tokenB,
+        uint24 feeTier
+    ) internal view returns (uint256 bidLiquidity, uint256 askLiquidity) {
+        // Implementation will vary based on DEX type
+        // This is a placeholder - actual implementation needed based on DEX interfaces
+        return (0, 0);
+    }
+
+    // View function to get current depth
+    function getOrderBookDepth(
+        address dex
+    ) external view returns (
+        uint256 bidDepth,
+        uint256 askDepth,
+        uint256 lastUpdateTime,
+        uint256 updateCount
+    ) {
+        OrderBookDepth storage depth = orderBookDepths[dex];
+        return (
+            depth.bidDepth,
+            depth.askDepth,
+            depth.lastUpdateTime,
+            depth.updateCount
+        );
+    }
 } 

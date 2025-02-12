@@ -5,9 +5,8 @@ from web3.types import TxParams, TxReceipt, Wei, Nonce
 from eth_typing import Address, ChecksumAddress
 import time
 import os
-from web3.middleware import geth_poa_middleware
 
-from ..core.types import OpportunityType, FlashLoanOpportunityType
+from src.core.types import OpportunityType, FlashLoanOpportunityType
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +28,6 @@ class TransactionBuilder:
                 'headers': {'User-Agent': 'FlashingBase/1.0.0'}
             }
         ))
-        
-        # Add PoA middleware for Base
-        self.web3.middleware_onion.inject(geth_poa_middleware, layer=0)
         
         if not self.web3.is_connected():
             raise ValueError("Failed to connect to Base mainnet via Alchemy")
