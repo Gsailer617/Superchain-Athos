@@ -48,8 +48,10 @@ from src.gas.gas_manager import GasManager
 from src.validation.market_validator import MarketValidator
 from src.market.analyzer import MarketAnalyzer, DefiLlamaIntegration
 from threading import Lock
-from src.agent.token_discovery import TokenDiscovery
+from src.core.chain_config import ChainRegistry, initialize_chains, get_chain_registry
 from src.monitoring.monitor_manager import MonitorManager
+from src.ml.huggingface_interface import HuggingFaceInterface
+from src.core.chain_connector import get_chain_connector
 
 # Type Aliases
 TokenAddress = str
@@ -621,37 +623,91 @@ def thread_safe_cache(func):
 class SuperchainArbitrageAgent:
     """Main arbitrage agent using composition of specialized components"""
     
-    def __init__(self, config_path: str = 'config.json'):
-        """Initialize the arbitrage agent"""
-        self.config_path = config_path
-        self.config = self._load_config()
+    def __init__(self, config_path: str = 'config.json', chains_config_path: str = 'config/chains.json'):
+        """Initialize the arbitrage agent
         
-        # Constants
-        self.MIN_CONFIDENCE = 0.8  # 80% minimum confidence threshold
-        self.VOLATILITY_THRESHOLD = 0.1  # 10% volatility threshold
+        Args:
+            config_path: Path to main configuration file
+            chains_config_path: Path to chain configuration file
+        """
+        self.config = self._load_config(config_path)
         
-        # Initialize Web3
-        self.web3 = get_web3()
-        self.async_web3 = get_async_web3()
+        # Initialize chain registry and connector
+        initialize_chains(chains_config_path)
+        self.chain_registry = get_chain_registry()
+        self.chain_connector = get_chain_connector()
         
-        # Initialize token discovery
-        self.token_discovery = TokenDiscovery(self.config)
+        # Initialize components with multi-chain support
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize gas manager and market validator first
-        self.gas_manager = GasManager(self.web3, self.config)
-        self.market_validator = MarketValidator(self.web3, self.config)
+        # Initialize model with correct parameters
+        model_config = self.config.get('model', {})
+        self.model = ArbitrageModel(
+            device=self.device,
+            num_features=model_config.get('num_features', 24),
+            hidden_dims=model_config.get('hidden_dims', [128, 64])
+        )
         
-        # Initialize components with config and dependencies
-        self.market_analyzer = MarketAnalyzer(config=self.config)
-        self.validator = TransactionValidator(web3=self.web3, config=self.config)
-        self.builder = TransactionBuilder(config=self.config)
+        self.training_manager = TrainingManager(
+            model=self.model,
+            device=self.device
+        )
+        
+        # Initialize chain-specific components and state
+        self.chain_states = {}
+        for chain_name in self.chain_registry.list_chains():
+            if self.chain_registry.is_chain_enabled(chain_name):
+                self.chain_states[chain_name] = {
+                    'last_block': 0,
+                    'gas_price': 0,
+                    'pending_txs': [],
+                    'active': True
+                }
+        
+        # Use the first active chain's web3 instance as default for single-chain components
+        default_chain = next(iter(self.chain_states.keys()))
+        default_web3 = asyncio.get_event_loop().run_until_complete(
+            self.chain_connector.get_connection(default_chain)
+        )
+        
+        if not default_web3:
+            raise ConfigurationError("Failed to initialize default Web3 connection")
+        
+        self.transaction_validator = TransactionValidator(
+            web3=default_web3,
+            config=self.config
+        )
+        
+        self.transaction_builder = TransactionBuilder(
+            config=self.config
+        )
+        
+        self.gas_manager = GasManager(
+            web3=default_web3,
+            config=self.config
+        )
+        
+        self.market_validator = MarketValidator(
+            web3=default_web3,
+            config=self.config
+        )
+        
         self.execution_engine = ExecutionEngine(
-            web3=self.web3,
+            web3=default_web3,
             gas_manager=self.gas_manager,
             market_validator=self.market_validator
         )
         
-        # Initialize monitoring and learning components
+        self.gas_optimizer = AsyncGasOptimizer(
+            web3=default_web3,
+            config=self.config
+        )
+        
+        self.market_analyzer = MarketAnalyzer(
+            config=self.config
+        )
+        
+        # Initialize monitoring manager
         self.monitor_manager = MonitorManager(
             config=self.config,
             storage_path=self.config.get('monitoring', {}).get('storage_path', 'data/monitoring'),
@@ -659,49 +715,55 @@ class SuperchainArbitrageAgent:
             cache_enabled=self.config.get('monitoring', {}).get('cache_enabled', True)
         )
         
-        # Initialize neural network components
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = ArbitrageModel(self.device)
-        self.training_manager = TrainingManager(self.model, self.device)
-        
-        # Initialize time series features tracking
-        self.time_series = TimeSeriesFeatures(
-            window_size=self.config.get('learning', {}).get('window_size', 100),
-            cleanup_threshold=self.config.get('learning', {}).get('cleanup_threshold', 1000)
-        )
-        
-        # Initialize specialized analyzers
-        self.cross_chain = CrossChainAnalyzer()
-        self.mev_protection = MEVProtection()
-        self.gas_optimizer = GasOptimizer()
-        self.token_economics = TokenEconomicsAnalyzer()
-        
-        # Initialize HuggingFace interface for advanced analysis
+        # Initialize HuggingFace interface
         self.hf_interface = HuggingFaceInterface(
             api_key=self.config.get('huggingface', {}).get('api_key')
         )
         
-        # Thread safety
-        self._execution_lock = asyncio.Lock()
-        self.execution_semaphore = asyncio.Semaphore(3)
-        
-        # Initialize execution tracking
-        self.active_executions = 0
-        self.volatility_history: List[Tuple[float, float]] = []
-        
-        # Initialize token pairs and test amounts
-        self.token_pairs = self._load_initial_token_pairs()
-        self.test_amounts = self._load_test_amounts()
-        
         # Initialize learning state
         self.learning_state = {
-            'model_version': 0,
-            'total_training_steps': 0,
+            'version': 1,
+            'steps': 0,
             'performance_history': [],
             'strategy_metrics': {},
             'feature_importance': {},
             'anomaly_scores': []
         }
+        
+        # Setup monitoring and analytics
+        self.defi_llama = DefiLlamaIntegration()
+        self.cross_chain_analyzer = CrossChainAnalyzer()
+        self.mev_protection = MEVProtection()
+        self.token_economics = TokenEconomicsAnalyzer()
+        
+        # Initialize performance tracking
+        self.performance_metrics = {chain: {} for chain in self.chain_states.keys()}
+        self.execution_history = []
+        self.optimization_history = []
+        
+        # Thread safety
+        self._lock = Lock()
+        
+        logger.info(f"Initialized SuperchainArbitrageAgent with {len(self.chain_states)} chains")
+        for chain in self.chain_states:
+            logger.info(f"Connected to {chain} at {self.chain_registry.get_chain(chain).rpc_url}")
+
+    def _load_config(self, config_path: str) -> Dict[str, Any]:
+        """Load main configuration file
+        
+        Args:
+            config_path: Path to configuration file
+            
+        Returns:
+            Dict containing configuration
+        """
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            return config
+        except Exception as e:
+            logger.error(f"Failed to load config from {config_path}: {str(e)}")
+            raise ConfigurationError(f"Failed to load config: {str(e)}")
 
     async def start(self):
         """Start the arbitrage agent with all components"""
@@ -753,8 +815,8 @@ class SuperchainArbitrageAgent:
                     # Log learning progress
                     logger.info(
                         "Learning progress",
-                        model_version=self.learning_state['model_version'],
-                        training_steps=self.learning_state['total_training_steps']
+                        model_version=self.learning_state['version'],
+                        training_steps=self.learning_state['steps']
                     )
                 
                 await asyncio.sleep(300)  # Sleep for 5 minutes
@@ -860,7 +922,7 @@ class SuperchainArbitrageAgent:
                 # Decrease learning rate for stability
                 self.model.adjust_learning_rate(factor=0.9)
                 
-            self.learning_state['model_version'] += 1
+            self.learning_state['version'] += 1
             
         except Exception as e:
             logger.error(f"Error updating model parameters: {str(e)}")
@@ -1333,69 +1395,81 @@ class SuperchainArbitrageAgent:
             logger.error(f"Error getting gas price: {str(e)}")
             return int(self.web3.eth.gas_price)
 
-    async def _check_network_status(self) -> Dict[str, Any]:
-        """Check network health status"""
-        try:
-            # Get latest block
+    async def _check_network_status(self) -> Dict[str, Dict[str, Any]]:
+        """Check network health status for all enabled chains
+        
+        Returns:
+            Dict mapping chain names to their health status
+        """
+        network_status = {}
+        
+        # Get health status for all chains
+        health_status = await self.chain_connector.check_all_chains_health()
+        
+        for chain_name in self.chain_states:
             try:
-                latest_block = self.web3.eth.get_block('latest')
+                chain_status = {
+                    'is_healthy': health_status.get(chain_name, False),
+                    'chain_id': self.chain_registry.get_chain(chain_name).chain_id,
+                    'last_block': 0,
+                    'block_delay': 0,
+                    'pending_tx_count': 0,
+                    'gas_price': 0,
+                    'reason': None
+                }
+                
+                # Get latest block
+                latest_block = await self.chain_connector.get_latest_block(chain_name)
+                if not latest_block:
+                    chain_status.update({
+                        'is_healthy': False,
+                        'reason': "No latest block returned"
+                    })
+                    network_status[chain_name] = chain_status
+                    continue
+                
+                chain_status['last_block'] = int(latest_block.get('number', 0))
+                
+                # Check block timestamp
+                try:
+                    block_timestamp = int(latest_block.get('timestamp', 0))
+                    block_delay = time.time() - block_timestamp
+                    chain_status['block_delay'] = block_delay
+                    
+                    # Get expected block time from chain config
+                    expected_block_time = self.chain_registry.get_chain(chain_name).block_time
+                    if block_delay > expected_block_time * 5:  # More than 5x expected block time
+                        chain_status.update({
+                            'is_healthy': False,
+                            'reason': f"High block delay: {block_delay:.1f}s"
+                        })
+                except (ValueError, TypeError, AttributeError) as e:
+                    logger.error(f"Error processing block timestamp for {chain_name}: {str(e)}")
+                    chain_status['block_delay'] = 0
+                
+                # Get gas price
+                gas_price = await self.chain_connector.get_gas_price(chain_name)
+                if gas_price is not None:
+                    chain_status['gas_price'] = gas_price
+                
+                # Update chain state
+                self.chain_states[chain_name].update({
+                    'last_block': chain_status['last_block'],
+                    'gas_price': chain_status['gas_price'],
+                    'active': chain_status['is_healthy']
+                })
+                
+                network_status[chain_name] = chain_status
+                
             except Exception as e:
-                logger.error(f"Failed to get latest block: {str(e)}")
-                return {
+                logger.error(f"Error checking network status for {chain_name}: {str(e)}")
+                network_status[chain_name] = {
                     'is_healthy': False,
-                    'reason': "Failed to get latest block"
+                    'reason': f"General error: {str(e)}",
+                    'chain_id': self.chain_registry.get_chain(chain_name).chain_id
                 }
-            
-            if not latest_block:
-                return {
-                    'is_healthy': False,
-                    'reason': "No latest block returned"
-                }
-            
-            # Check block timestamp
-            try:
-                block_timestamp = int(latest_block.get('timestamp', 0))
-            except (ValueError, TypeError, AttributeError):
-                block_timestamp = 0
-                
-            block_delay = time.time() - block_timestamp
-            if block_delay > 60:  # More than 1 minute delay
-                return {
-                    'is_healthy': False,
-                    'reason': f"Block delay: {block_delay:.1f}s"
-                }
-            
-            # Check pending transactions
-            try:
-                pending_tx_count = self.web3.eth.get_block_transaction_count('pending')
-            except Exception:
-                pending_tx_count = 0
-                
-            if pending_tx_count > 10000:  # High pending tx count
-                return {
-                    'is_healthy': False,
-                    'reason': f"High pending transaction count: {pending_tx_count}"
-                }
-            
-            # Get block number
-            try:
-                block_number = int(latest_block.get('number', 0))
-            except (ValueError, TypeError, AttributeError):
-                block_number = 0
-            
-            return {
-                'is_healthy': True,
-                'block_number': block_number,
-                'block_delay': block_delay,
-                'pending_tx_count': pending_tx_count
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking network status: {str(e)}")
-            return {
-                'is_healthy': False,
-                'reason': f"Network error: {str(e)}"
-            }
+        
+        return network_status
 
     async def _update_execution_metrics(self, result: ExecutionResult):
         """Update execution metrics for monitoring"""
@@ -1687,12 +1761,3 @@ class SuperchainArbitrageAgent:
             key=lambda x: self._safe_float_conversion(x.get('predicted_profit')),
             reverse=True
         )
-
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from file"""
-        try:
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading config: {str(e)}")
-            raise ConfigurationError(f"Failed to load config: {str(e)}")

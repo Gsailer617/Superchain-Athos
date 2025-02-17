@@ -196,3 +196,249 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 ## Support
 
 For support, please open an issue in the repository or contact the development team through the provided channels.
+
+# Supported Blockchains
+
+This project supports multiple blockchains for cross-chain arbitrage opportunities. Below are the details for each supported chain:
+
+## Layer 1 Chains
+
+### Ethereum
+- **Chain ID**: 1
+- **Block Time**: ~12 seconds
+- **Gas Model**: EIP-1559
+- **RPC Endpoint**: `ETHEREUM_RPC_URL` in .env
+- **Documentation**: [Ethereum Docs](https://ethereum.org/en/developers/docs/)
+- **Special Notes**: 
+  - Base layer for most L2s
+  - Highest security but also highest gas fees
+  - MEV protection via Flashbots
+
+### Polygon
+- **Chain ID**: 137
+- **Block Time**: ~2 seconds
+- **Gas Model**: EIP-1559
+- **RPC Endpoint**: `POLYGON_RPC_URL` in .env
+- **Documentation**: [Polygon Docs](https://docs.polygon.technology/tools/)
+- **Special Notes**:
+  - High throughput, low fees
+  - Requires monitoring MATIC token price for gas
+  - Multiple bridge options (PoS, Plasma)
+
+### BNB Chain
+- **Chain ID**: 56
+- **Block Time**: ~3 seconds
+- **Gas Model**: Legacy
+- **RPC Endpoint**: `BNB_RPC_URL` in .env
+- **Documentation**: [BNB Chain Docs](https://docs.bnbchain.org/bnb-smart-chain/)
+- **Special Notes**:
+  - High throughput
+  - Centralized validator set
+  - Multiple RPC endpoints recommended
+
+### Avalanche
+- **Chain ID**: 43114
+- **Block Time**: ~2 seconds
+- **Gas Model**: EIP-1559
+- **RPC Endpoint**: `AVALANCHE_RPC_URL` in .env
+- **Documentation**: [Avalanche Docs](https://build.avax.network/docs)
+- **Special Notes**:
+  - C-Chain for EVM compatibility
+  - Fast finality
+  - Subnet support
+
+### Gnosis
+- **Chain ID**: 100
+- **Block Time**: ~5 seconds
+- **Gas Model**: EIP-1559
+- **RPC Endpoint**: `GNOSIS_RPC_URL` in .env
+- **Documentation**: [Gnosis Docs](https://docs.gnosischain.com/developers/Overview)
+- **Special Notes**:
+  - xDAI as native token
+  - Stable token focus
+  - OmniBridge support
+
+## Layer 2 Chains
+
+### Base
+- **Chain ID**: 8453
+- **Block Time**: ~2 seconds
+- **Gas Model**: Optimistic
+- **RPC Endpoint**: `BASE_RPC_URL` in .env
+- **Documentation**: [Base Docs](https://docs.base.org/docs/)
+- **Special Notes**:
+  - Optimistic rollup
+  - 7-day withdrawal period
+  - Coinbase integration
+
+### Arbitrum
+- **Chain ID**: 42161
+- **Block Time**: ~250ms
+- **Gas Model**: Arbitrum-specific
+- **RPC Endpoint**: `ARBITRUM_RPC_URL` in .env
+- **Documentation**: [Arbitrum Docs](https://docs.arbitrum.io/welcome/get-started)
+- **Special Notes**:
+  - Nitro upgrade
+  - Complex gas pricing
+  - High throughput
+
+### Optimism
+- **Chain ID**: 10
+- **Block Time**: ~2 seconds
+- **Gas Model**: Optimistic
+- **RPC Endpoint**: `OPTIMISM_RPC_URL` in .env
+- **Documentation**: [Optimism Docs](https://docs.optimism.io/)
+- **Special Notes**:
+  - Bedrock upgrade
+  - Similar to Ethereum
+  - Strong infrastructure
+
+### Linea
+- **Chain ID**: 59144
+- **Block Time**: ~12 seconds
+- **Gas Model**: EIP-1559
+- **RPC Endpoint**: `LINEA_RPC_URL` in .env
+- **Documentation**: [Linea Docs](https://docs.linea.build/get-started)
+- **Special Notes**:
+  - ZK rollup
+  - ConsenSys backing
+  - ZK proof verification times
+
+### Mantle
+- **Chain ID**: 5000
+- **Block Time**: ~2 seconds
+- **Gas Model**: Optimistic
+- **RPC Endpoint**: `MANTLE_RPC_URL` in .env
+- **Documentation**: [Mantle Docs](https://docs.mantle.xyz/network)
+- **Special Notes**:
+  - Optimistic rollup
+  - Data availability
+  - MNT token incentives
+
+### Mode
+- **Chain ID**: 34443
+- **Block Time**: ~2 seconds
+- **Gas Model**: Mode-specific
+- **RPC Endpoint**: `MODE_RPC_URL` in .env
+- **Documentation**: [Mode Docs](https://docs.mode.network/)
+- **Special Notes**:
+  - Fixed priority fees
+  - Sequencer infrastructure
+  - Optimized for DeFi
+
+### Sonic
+- **Chain ID**: 8899
+- **Block Time**: ~1 second
+- **Gas Model**: Sonic-specific
+- **RPC Endpoint**: `SONIC_RPC_URL` in .env
+- **Documentation**: [Sonic Docs](https://docs.soniclabs.com/sonic/build-on-sonic/getting-started)
+- **Special Notes**:
+  - High performance
+  - Low latency
+  - Fixed gas fees
+
+## Bridge Support
+
+Each chain pair has specific bridge configurations and adapters:
+
+- **Canonical Bridges**: Official bridges between L1-L2 pairs
+- **Third-party Bridges**: Supported bridges include:
+  - LayerZero
+  - deBridge
+  - Across
+  - Superbridge
+  - OmniBridge (Gnosis)
+  - Plasma and PoS (Polygon)
+
+## Configuration
+
+All chain configurations are managed through environment variables. See `.env.example` for required variables.
+
+### Required Environment Variables
+
+```bash
+# RPC URLs
+ETHEREUM_RPC_URL=
+BASE_RPC_URL=
+POLYGON_RPC_URL=
+ARBITRUM_RPC_URL=
+OPTIMISM_RPC_URL=
+BNB_RPC_URL=
+LINEA_RPC_URL=
+MANTLE_RPC_URL=
+AVALANCHE_RPC_URL=
+GNOSIS_RPC_URL=
+MODE_RPC_URL=
+SONIC_RPC_URL=
+
+# Bridge Contract Addresses
+MODE_L1_BRIDGE=
+MODE_L2_BRIDGE=
+MODE_MESSAGE_SERVICE=
+SONIC_BRIDGE_ROUTER=
+SONIC_TOKEN_BRIDGE=
+SONIC_LIQUIDITY_POOL=
+# ... other bridge addresses
+```
+
+## Gas Management
+
+Each chain has specific gas management requirements:
+
+- **EIP-1559 Chains**: Use base fee + priority fee
+- **Legacy Chains**: Use gas price only
+- **L2-specific**: Use custom gas models (Arbitrum, Optimism)
+- **Fixed Fee Chains**: Use predefined fees (Mode, Sonic)
+
+## Performance Considerations
+
+- Monitor block times and confirmation requirements
+- Account for bridge-specific delays
+- Consider gas token prices (ETH, MATIC, BNB, etc.)
+- Watch for network congestion
+- Monitor bridge liquidity
+
+## Adding New Chains
+
+To add support for a new blockchain:
+
+1. Add chain configuration to `src/config/chain_configurations.py`
+2. Implement bridge adapter if needed
+3. Update gas management for chain-specific models
+4. Add chain-specific tests
+5. Update environment variables
+6. Test thoroughly on testnet before mainnet
+
+## Troubleshooting
+
+Common issues and solutions:
+
+### RPC Connection Issues
+- Verify RPC URL is correct and accessible
+- Check for rate limiting
+- Use fallback RPC providers
+
+### Gas Estimation Failures
+- Check chain-specific gas models
+- Verify gas token balance
+- Monitor network congestion
+
+### Bridge Transfer Issues
+- Verify bridge contract addresses
+- Check bridge liquidity
+- Monitor bridge status
+- Verify message proofs
+
+### Transaction Failures
+- Check nonce management
+- Verify gas settings
+- Monitor chain state
+
+## Resources
+
+- [Ethereum Gas Tracker](https://etherscan.io/gastracker)
+- [L2 Gas Fees](https://l2fees.info/)
+- [Bridge Monitor](https://bridges.llama.fi/)
+- [Chain Analytics](https://defillama.com/)
+
+For more detailed information, refer to each chain's official documentation linked above.

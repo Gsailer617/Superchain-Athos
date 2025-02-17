@@ -1,14 +1,342 @@
 import logging
-from typing import Dict, Union, Optional, Tuple, List
+from typing import Dict, Union, Optional, Tuple, List, cast, Any, TypedDict
 from web3 import Web3
 from web3.types import TxParams, TxReceipt, Wei, Nonce
 from eth_typing import Address, ChecksumAddress
 import time
 import os
+from dataclasses import dataclass
 
 from src.core.types import OpportunityType, FlashLoanOpportunityType
+from src.core.register_adapters import get_registered_adapters
+from src.core.bridge_adapter import BridgeConfig, BridgeState
 
 logger = logging.getLogger(__name__)
+
+class CrossChainOpportunityType(TypedDict):
+    """Type definition for cross-chain opportunity"""
+    source_chain: str
+    target_chain: str
+    token_pair: Tuple[str, str]
+    amount: float
+    recipient: str
+
+@dataclass
+class CrossChainTxResult:
+    """Result of cross-chain transaction preparation"""
+    source_tx: Optional[TxParams]
+    target_tx: Optional[TxParams]
+    bridge_name: str
+    estimated_time: int
+    total_fee: float
+    success: bool
+    error: Optional[str] = None
+
+class CrossChainTransactionBuilder:
+    """Builds transactions for cross-chain arbitrage"""
+    
+    def __init__(self, config: Dict):
+        self.config = config
+        self.web3_connections: Dict[str, Web3] = {}
+        self._initialize_connections()
+        
+    def _initialize_connections(self) -> None:
+        """Initialize Web3 connections for each chain"""
+        for chain in self.config['supported_chains']:
+            try:
+                alchemy_key = os.getenv(f'{chain.upper()}_ALCHEMY_KEY')
+                if not alchemy_key:
+                    logger.error(f"Missing Alchemy key for {chain}")
+                    continue
+                    
+                rpc_url = f"https://{chain}-mainnet.g.alchemy.com/v2/{alchemy_key}"
+                web3 = Web3(Web3.HTTPProvider(
+                    rpc_url,
+                    request_kwargs={
+                        'timeout': 30,
+                        'headers': {'User-Agent': 'FlashingBase/1.0.0'}
+                    }
+                ))
+                
+                if web3.is_connected():
+                    self.web3_connections[chain] = web3
+                    logger.info(f"Connected to {chain}")
+                else:
+                    logger.error(f"Failed to connect to {chain}")
+                    
+            except Exception as e:
+                logger.error(f"Error initializing {chain} connection: {str(e)}")
+                
+    async def build_cross_chain_transaction(
+        self,
+        opportunity: CrossChainOpportunityType
+    ) -> CrossChainTxResult:
+        """Build transactions for cross-chain arbitrage
+        
+        Args:
+            opportunity: Cross-chain arbitrage opportunity
+            
+        Returns:
+            CrossChainTxResult containing source and target transactions
+        """
+        try:
+            source_chain = opportunity['source_chain']
+            target_chain = opportunity['target_chain']
+            
+            # Get Web3 connections
+            source_web3 = self.web3_connections.get(source_chain)
+            target_web3 = self.web3_connections.get(target_chain)
+            
+            if not source_web3 or not target_web3:
+                return CrossChainTxResult(
+                    source_tx=None,
+                    target_tx=None,
+                    bridge_name="",
+                    estimated_time=0,
+                    total_fee=0,
+                    success=False,
+                    error="Missing Web3 connection"
+                )
+            
+            # Get available bridges
+            bridge_analysis = await self._analyze_bridges(
+                opportunity['token_pair'],
+                opportunity['amount'],
+                source_chain,
+                target_chain,
+                source_web3
+            )
+            
+            if not bridge_analysis['success']:
+                return CrossChainTxResult(
+                    source_tx=None,
+                    target_tx=None,
+                    bridge_name="",
+                    estimated_time=0,
+                    total_fee=0,
+                    success=False,
+                    error=bridge_analysis['error']
+                )
+            
+            # Prepare transactions
+            source_tx = await self._build_source_transaction(
+                opportunity,
+                bridge_analysis,
+                source_web3
+            )
+            
+            target_tx = await self._build_target_transaction(
+                opportunity,
+                bridge_analysis,
+                target_web3
+            )
+            
+            return CrossChainTxResult(
+                source_tx=source_tx,
+                target_tx=target_tx,
+                bridge_name=bridge_analysis['recommended_bridge'],
+                estimated_time=bridge_analysis['estimated_time'],
+                total_fee=bridge_analysis['total_fee'],
+                success=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Error building cross-chain transaction: {str(e)}")
+            return CrossChainTxResult(
+                source_tx=None,
+                target_tx=None,
+                bridge_name="",
+                estimated_time=0,
+                total_fee=0,
+                success=False,
+                error=str(e)
+            )
+            
+    async def _analyze_bridges(
+        self,
+        token_pair: Tuple[str, str],
+        amount: float,
+        source_chain: str,
+        target_chain: str,
+        web3: Web3
+    ) -> Dict[str, Any]:
+        """Analyze available bridges and select optimal one"""
+        try:
+            registered_adapters = get_registered_adapters()
+            
+            best_bridge = None
+            lowest_fee = float('inf')
+            best_time = float('inf')
+            
+            results = {
+                'success': False,
+                'recommended_bridge': "",
+                'estimated_time': 0,
+                'total_fee': 0,
+                'error': None
+            }
+            
+            for bridge_name, adapter_class in registered_adapters.items():
+                try:
+                    # Create bridge config
+                    config = self._create_bridge_config(bridge_name, source_chain, target_chain)
+                    
+                    # Initialize adapter
+                    adapter = adapter_class(config, web3)
+                    
+                    # Check if bridge is active and supports transfer
+                    if (adapter.get_bridge_state(source_chain, target_chain) == BridgeState.ACTIVE and
+                        adapter.validate_transfer(source_chain, target_chain, token_pair[0], amount)):
+                        
+                        # Get fees and time estimate
+                        fees = adapter.estimate_fees(source_chain, target_chain, token_pair[0], amount)
+                        time_estimate = adapter.estimate_time(source_chain, target_chain)
+                        
+                        # Update best bridge if this one has lower fees
+                        total_fee = fees.get('total', float('inf'))
+                        if total_fee < lowest_fee:
+                            best_bridge = bridge_name
+                            lowest_fee = total_fee
+                            best_time = time_estimate
+                            
+                except Exception as e:
+                    logger.error(f"Error analyzing bridge {bridge_name}: {str(e)}")
+                    continue
+                    
+            if best_bridge:
+                results.update({
+                    'success': True,
+                    'recommended_bridge': best_bridge,
+                    'estimated_time': best_time,
+                    'total_fee': lowest_fee
+                })
+            else:
+                results['error'] = "No suitable bridge found"
+                
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in bridge analysis: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+            
+    def _create_bridge_config(
+        self,
+        bridge_name: str,
+        source_chain: str,
+        target_chain: str
+    ) -> BridgeConfig:
+        """Create bridge configuration"""
+        base_config = BridgeConfig(
+            name=bridge_name,
+            supported_chains=[source_chain, target_chain],
+            min_amount=self.config.get('min_amount', 0.0),
+            max_amount=self.config.get('max_amount', float('inf')),
+            fee_multiplier=self.config.get('fee_multiplier', 1.0),
+            gas_limit_multiplier=self.config.get('gas_limit_multiplier', 1.2),
+            confirmation_blocks=self.config.get('confirmation_blocks', 1)
+        )
+        
+        # Add chain-specific bridge contracts
+        if bridge_name == 'mode':
+            base_config.bridge_contracts = {
+                'l1_bridge': self.config.get('mode_config', {}).get('l1_bridge', ''),
+                'l2_bridge': self.config.get('mode_config', {}).get('l2_bridge', ''),
+                'message_service': self.config.get('mode_config', {}).get('message_service', '')
+            }
+        elif bridge_name == 'sonic':
+            base_config.bridge_contracts = {
+                'bridge_router': self.config.get('sonic_config', {}).get('bridge_router', ''),
+                'token_bridge': self.config.get('sonic_config', {}).get('token_bridge', ''),
+                'liquidity_pool': self.config.get('sonic_config', {}).get('liquidity_pool', '')
+            }
+        
+        return base_config
+        
+    async def _build_source_transaction(
+        self,
+        opportunity: CrossChainOpportunityType,
+        bridge_analysis: Dict[str, Any],
+        web3: Web3
+    ) -> Optional[TxParams]:
+        """Build transaction for source chain"""
+        try:
+            # Get bridge adapter
+            adapter_class = get_registered_adapters()[bridge_analysis['recommended_bridge']]
+            config = self._create_bridge_config(
+                bridge_analysis['recommended_bridge'],
+                opportunity['source_chain'],
+                opportunity['target_chain']
+            )
+            
+            adapter = adapter_class(config, web3)
+            
+            # Prepare bridge transfer
+            tx_params = adapter.prepare_transfer(
+                opportunity['source_chain'],
+                opportunity['target_chain'],
+                opportunity['token_pair'][0],
+                opportunity['amount'],
+                opportunity['recipient']
+            )
+            
+            # Add chain-specific parameters
+            if opportunity['source_chain'] == 'mode':
+                # Mode uses optimized gas parameters
+                tx_params['maxFeePerGas'] = Wei(int(tx_params.get('gasPrice', 0) * 0.8))  # 20% lower than standard
+                if 'gasPrice' in tx_params:
+                    del tx_params['gasPrice']  # Remove legacy gas price when using EIP-1559
+            elif opportunity['source_chain'] == 'sonic':
+                # Sonic uses fixed priority fee
+                tx_params['maxPriorityFeePerGas'] = Wei(1_000_000_000)  # 1 gwei
+                if 'gasPrice' in tx_params:
+                    del tx_params['gasPrice']  # Remove legacy gas price when using EIP-1559
+            
+            return tx_params
+            
+        except Exception as e:
+            logger.error(f"Error building source transaction: {str(e)}")
+            return None
+            
+    async def _build_target_transaction(
+        self,
+        opportunity: CrossChainOpportunityType,
+        bridge_analysis: Dict[str, Any],
+        web3: Web3
+    ) -> Optional[TxParams]:
+        """Build transaction for target chain"""
+        try:
+            # For target chain, we typically need to prepare a transaction that will
+            # execute once the bridged funds arrive. This might involve:
+            # 1. Swapping the received tokens
+            # 2. Sending them to a specific contract
+            # 3. Executing an arbitrage
+            
+            # This is a placeholder - implement based on your specific needs
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error building target transaction: {str(e)}")
+            return None
+            
+    async def _get_optimal_gas_price(self, web3: Web3) -> int:
+        """Get optimal gas price for chain"""
+        try:
+            block = web3.eth.get_block('latest')
+            base_fee = block.get('baseFeePerGas', web3.eth.gas_price)
+            priority_fee = web3.eth.max_priority_fee
+            
+            return int(base_fee * 1.2) + priority_fee
+            
+        except Exception as e:
+            logger.error(f"Error getting gas price: {str(e)}")
+            return web3.eth.gas_price
+            
+    async def _estimate_gas(self, web3: Web3, tx_params: TxParams) -> int:
+        """Estimate gas for transaction"""
+        return web3.eth.estimate_gas(tx_params)
 
 class TransactionBuilder:
     """Builds and signs transactions for execution"""

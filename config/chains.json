@@ -1,0 +1,122 @@
+{
+    "ethereum": {
+        "name": "ethereum",
+        "chain_id": 1,
+        "rpc_url": "https://mainnet.infura.io/v3/${INFURA_PROJECT_ID}",
+        "chain_type": "mainnet",
+        "block_time": 12,
+        "native_currency": "ETH",
+        "explorer_url": "https://etherscan.io",
+        "is_enabled": true,
+        "tokens": {
+            "WETH": {
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "decimals": 18,
+                "symbol": "WETH",
+                "is_native": false
+            },
+            "USDC": {
+                "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                "decimals": 6,
+                "symbol": "USDC",
+                "is_native": false
+            },
+            "USDT": {
+                "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "decimals": 6,
+                "symbol": "USDT",
+                "is_native": false
+            }
+        }
+    },
+    "polygon": {
+        "name": "polygon",
+        "chain_id": 137,
+        "rpc_url": "https://polygon-rpc.com",
+        "chain_type": "mainnet",
+        "block_time": 2,
+        "native_currency": "MATIC",
+        "explorer_url": "https://polygonscan.com",
+        "is_enabled": true,
+        "tokens": {
+            "WMATIC": {
+                "address": "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",
+                "decimals": 18,
+                "symbol": "WMATIC",
+                "is_native": false
+            },
+            "WETH": {
+                "address": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+                "decimals": 18,
+                "symbol": "WETH",
+                "is_native": false
+            },
+            "USDC": {
+                "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+                "decimals": 6,
+                "symbol": "USDC",
+                "is_native": false
+            }
+        }
+    },
+    "base": {
+        "name": "base",
+        "chain_id": 8453,
+        "rpc_url": "https://mainnet.base.org",
+        "chain_type": "mainnet",
+        "block_time": 2,
+        "native_currency": "ETH",
+        "explorer_url": "https://basescan.org",
+        "is_enabled": true,
+        "tokens": {
+            "WETH": {
+                "address": "0x4200000000000000000000000000000000000006",
+                "decimals": 18,
+                "symbol": "WETH",
+                "is_native": false
+            },
+            "USDbC": {
+                "address": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+                "decimals": 6,
+                "symbol": "USDbC",
+                "is_native": false
+            },
+            "USDC": {
+                "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+                "decimals": 6,
+                "symbol": "USDC",
+                "is_native": false
+            }
+        }
+    },
+    "avalanche": {
+        "name": "avalanche",
+        "chain_id": 43114,
+        "rpc_url": "https://api.avax.network/ext/bc/C/rpc",
+        "chain_type": "mainnet",
+        "block_time": 2,
+        "native_currency": "AVAX",
+        "explorer_url": "https://snowtrace.io",
+        "is_enabled": true,
+        "tokens": {
+            "WAVAX": {
+                "address": "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
+                "decimals": 18,
+                "symbol": "WAVAX",
+                "is_native": false
+            },
+            "WETH": {
+                "address": "0x49D5c2BdFfac6CE2BFdB6640F4F80f226bc10bAB",
+                "decimals": 18,
+                "symbol": "WETH",
+                "is_native": false
+            },
+            "USDC": {
+                "address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
+                "decimals": 6,
+                "symbol": "USDC",
+                "is_native": false
+            }
+        }
+    }
+} 
