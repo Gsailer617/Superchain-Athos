@@ -8,6 +8,8 @@ import time
 from ..utils.cache import AsyncCache
 from ..utils.metrics import MetricsManager
 from ..integrations.defillama import DefiLlamaIntegration
+# Import the shared metrics
+from .cross_chain_analyzer import ChainMetrics as BaseChainMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +24,8 @@ class BridgeMetrics:
     success_rate: float
     timestamp: float
 
-@dataclass
-class ChainMetrics:
-    """Chain performance metrics"""
-    tvl: float
-    volume_24h: float
-    transactions_24h: int
-    avg_block_time: float
-    avg_gas_price: float
-    timestamp: float
+# Using the extended metrics from cross_chain_analyzer.py
+ChainMetrics = BaseChainMetrics
 
 class CrossChainAnalyzer:
     """Analysis of cross-chain metrics and opportunities"""

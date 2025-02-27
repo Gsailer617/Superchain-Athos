@@ -1,15 +1,23 @@
 import logging
-from typing import Dict, Union, Optional, Tuple, List, cast, Any, TypedDict
+from typing import Dict, Union, Optional, Tuple, List, cast, Any, TypedDict, Callable
 from web3 import Web3
 from web3.types import TxParams, TxReceipt, Wei, Nonce
 from eth_typing import Address, ChecksumAddress
 import time
 import os
+import json
+import asyncio
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+import aiohttp
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.core.types import OpportunityType, FlashLoanOpportunityType
+from src.core.types import OpportunityType, FlashLoanOpportunityType, ExecutionResult, ExecutionStatus
 from src.core.register_adapters import get_registered_adapters
 from src.core.bridge_adapter import BridgeConfig, BridgeState
+from src.gas.gas_manager import GasManager
+from src.validation.market_validator import MarketValidator
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +47,7 @@ class CrossChainTransactionBuilder:
         self.config = config
         self.web3_connections: Dict[str, Web3] = {}
         self._initialize_connections()
+        self._session: Optional[aiohttp.ClientSession] = None
         
     def _initialize_connections(self) -> None:
         """Initialize Web3 connections for each chain"""
@@ -66,6 +75,14 @@ class CrossChainTransactionBuilder:
                     
             except Exception as e:
                 logger.error(f"Error initializing {chain} connection: {str(e)}")
+    
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": "FlashingBase/1.0.0"}
+            )
+        return self._session
                 
     async def build_cross_chain_transaction(
         self,
@@ -173,35 +190,49 @@ class CrossChainTransactionBuilder:
                 'recommended_bridge': "",
                 'estimated_time': 0,
                 'total_fee': 0,
-                'error': None
+                'error': None,
+                'all_bridges': {}  # Store all bridge results for comparison
             }
             
+            # Create tasks for parallel bridge analysis
+            tasks = []
             for bridge_name, adapter_class in registered_adapters.items():
-                try:
-                    # Create bridge config
-                    config = self._create_bridge_config(bridge_name, source_chain, target_chain)
+                tasks.append(self._analyze_single_bridge(
+                    bridge_name, 
+                    adapter_class, 
+                    token_pair, 
+                    amount, 
+                    source_chain, 
+                    target_chain, 
+                    web3
+                ))
+            
+            # Run all bridge analyses in parallel
+            bridge_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Process results
+            for result in bridge_results:
+                if isinstance(result, Exception):
+                    continue
                     
-                    # Initialize adapter
-                    adapter = adapter_class(config, web3)
+                if not result['success']:
+                    continue
                     
-                    # Check if bridge is active and supports transfer
-                    if (adapter.get_bridge_state(source_chain, target_chain) == BridgeState.ACTIVE and
-                        adapter.validate_transfer(source_chain, target_chain, token_pair[0], amount)):
-                        
-                        # Get fees and time estimate
-                        fees = adapter.estimate_fees(source_chain, target_chain, token_pair[0], amount)
-                        time_estimate = adapter.estimate_time(source_chain, target_chain)
+                bridge_name = result['bridge_name']
+                total_fee = result['total_fee']
+                time_estimate = result['estimated_time']
+                
+                # Store all bridge results
+                results['all_bridges'][bridge_name] = {
+                    'fee': total_fee,
+                    'time': time_estimate
+                }
                         
                         # Update best bridge if this one has lower fees
-                        total_fee = fees.get('total', float('inf'))
                         if total_fee < lowest_fee:
                             best_bridge = bridge_name
                             lowest_fee = total_fee
                             best_time = time_estimate
-                            
-                except Exception as e:
-                    logger.error(f"Error analyzing bridge {bridge_name}: {str(e)}")
-                    continue
                     
             if best_bridge:
                 results.update({
@@ -219,6 +250,53 @@ class CrossChainTransactionBuilder:
             logger.error(f"Error in bridge analysis: {str(e)}")
             return {
                 'success': False,
+                'error': str(e)
+            }
+    
+    async def _analyze_single_bridge(
+        self,
+        bridge_name: str,
+        adapter_class: Any,
+        token_pair: Tuple[str, str],
+        amount: float,
+        source_chain: str,
+        target_chain: str,
+        web3: Web3
+    ) -> Dict[str, Any]:
+        """Analyze a single bridge for suitability"""
+        try:
+            # Create bridge config
+            config = self._create_bridge_config(bridge_name, source_chain, target_chain)
+            
+            # Initialize adapter
+            adapter = adapter_class(config, web3)
+            
+            # Check if bridge is active and supports transfer
+            if (adapter.get_bridge_state(source_chain, target_chain) == BridgeState.ACTIVE and
+                adapter.validate_transfer(source_chain, target_chain, token_pair[0], amount)):
+                
+                # Get fees and time estimate
+                fees = adapter.estimate_fees(source_chain, target_chain, token_pair[0], amount)
+                time_estimate = adapter.estimate_time(source_chain, target_chain)
+                
+                return {
+                    'success': True,
+                    'bridge_name': bridge_name,
+                    'total_fee': fees.get('total', float('inf')),
+                    'estimated_time': time_estimate
+                }
+            
+            return {
+                'success': False,
+                'bridge_name': bridge_name,
+                'error': 'Bridge inactive or transfer invalid'
+            }
+                
+        except Exception as e:
+            logger.error(f"Error analyzing bridge {bridge_name}: {str(e)}")
+            return {
+                'success': False,
+                'bridge_name': bridge_name,
                 'error': str(e)
             }
             
@@ -286,6 +364,7 @@ class CrossChainTransactionBuilder:
             if opportunity['source_chain'] == 'mode':
                 # Mode uses optimized gas parameters
                 tx_params['maxFeePerGas'] = Wei(int(tx_params.get('gasPrice', 0) * 0.8))  # 20% lower than standard
+                tx_params['maxPriorityFeePerGas'] = Wei(1_500_000_000)  # 1.5 gwei
                 if 'gasPrice' in tx_params:
                     del tx_params['gasPrice']  # Remove legacy gas price when using EIP-1559
             elif opportunity['source_chain'] == 'sonic':
@@ -314,7 +393,39 @@ class CrossChainTransactionBuilder:
             # 2. Sending them to a specific contract
             # 3. Executing an arbitrage
             
-            # This is a placeholder - implement based on your specific needs
+            # Get bridge adapter
+            adapter_class = get_registered_adapters()[bridge_analysis['recommended_bridge']]
+            config = self._create_bridge_config(
+                bridge_analysis['recommended_bridge'],
+                opportunity['source_chain'],
+                opportunity['target_chain']
+            )
+            
+            adapter = adapter_class(config, web3)
+            
+            # Prepare target chain transaction (if supported by the bridge)
+            if hasattr(adapter, 'prepare_target_transaction'):
+                tx_params = adapter.prepare_target_transaction(
+                    opportunity['source_chain'],
+                    opportunity['target_chain'],
+                    opportunity['token_pair'][1],  # Target token
+                    opportunity['amount'],
+                    opportunity['recipient']
+                )
+                
+                # Add chain-specific parameters for target chain
+                if opportunity['target_chain'] == 'mode':
+                    tx_params['maxFeePerGas'] = Wei(int(tx_params.get('gasPrice', 0) * 0.8))
+                    tx_params['maxPriorityFeePerGas'] = Wei(1_500_000_000)
+                    if 'gasPrice' in tx_params:
+                        del tx_params['gasPrice']
+                elif opportunity['target_chain'] == 'sonic':
+                    tx_params['maxPriorityFeePerGas'] = Wei(1_000_000_000)
+                    if 'gasPrice' in tx_params:
+                        del tx_params['gasPrice']
+                
+                return tx_params
+            
             return None
             
         except Exception as e:
@@ -337,11 +448,16 @@ class CrossChainTransactionBuilder:
     async def _estimate_gas(self, web3: Web3, tx_params: TxParams) -> int:
         """Estimate gas for transaction"""
         return web3.eth.estimate_gas(tx_params)
+        
+    async def cleanup(self) -> None:
+        """Clean up resources"""
+        if self._session and not self._session.closed:
+            await self._session.close()
 
 class TransactionBuilder:
     """Builds and signs transactions for execution"""
     
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, gas_manager: Optional[GasManager] = None, market_validator: Optional[MarketValidator] = None):
         """Initialize transaction builder with configuration"""
         # Get Alchemy key from environment
         alchemy_key = os.getenv('ALCHEMY_API_KEY')
@@ -368,31 +484,68 @@ class TransactionBuilder:
         self.web3.eth.default_account = self.web3.to_checksum_address(account.address)
             
         self.config = config
+        self.gas_manager = gas_manager
+        self.market_validator = market_validator
+        self.abi_cache: Dict[str, List] = {}
+        self._session: Optional[aiohttp.ClientSession] = None
+        
+    async def get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": "FlashingBase/1.0.0"}
+            )
+        return self._session
         
     async def build_transaction(
         self,
-        opportunity: Union[OpportunityType, FlashLoanOpportunityType]
+        opportunity: Union[OpportunityType, FlashLoanOpportunityType],
+        use_eip1559: bool = True
     ) -> Optional[TxParams]:
         """Build transaction for arbitrage execution
         
         Args:
             opportunity: Arbitrage opportunity to execute
+            use_eip1559: Whether to use EIP-1559 transaction format
             
         Returns:
             TxParams containing transaction parameters or None if build fails
         """
         try:
-            # Get optimal gas price
-            gas_price = await self._get_optimal_gas_price()
+            # Validate market conditions if validator is available
+            if self.market_validator:
+                if not await self.market_validator.validate_conditions():
+                    logger.warning("Market conditions not favorable for transaction")
+                    return None
+            
+            # Get nonce
+            nonce = await self._get_nonce()
             
             # Build base transaction
             tx: TxParams = {
                 'from': self.web3.to_checksum_address(str(self.web3.eth.default_account)),
-                'gasPrice': Wei(gas_price),
-                'nonce': Nonce(await self._get_nonce()),
+                'nonce': Nonce(nonce),
                 'chainId': self.web3.eth.chain_id,
                 'value': Wei(0),
             }
+            
+            # Add gas parameters based on EIP-1559 support
+            if use_eip1559:
+                # Use EIP-1559 gas parameters
+                if self.gas_manager:
+                    gas_settings = await self.gas_manager.optimize_gas_settings(tx)
+                    tx.update(gas_settings)
+                else:
+                    # Fallback if no gas manager
+                    block = await self.web3.eth.get_block('latest')
+                    base_fee = block.get('baseFeePerGas', await self.web3.eth.gas_price)
+                    priority_fee = await self.web3.eth.max_priority_fee
+                    
+                    tx['maxFeePerGas'] = Wei(int(base_fee * 1.5) + priority_fee)
+                    tx['maxPriorityFeePerGas'] = Wei(priority_fee)
+            else:
+                # Use legacy gas price
+                tx['gasPrice'] = Wei(await self._get_optimal_gas_price())
             
             # Add opportunity-specific parameters
             if opportunity['type'] == 'Flash Loan Arbitrage':
@@ -406,12 +559,8 @@ class TransactionBuilder:
                 tx['gas'] = int(gas_estimate * 1.2)  # Add 20% buffer
             except Exception as e:
                 logger.error(f"Error estimating gas: {str(e)}")
-                return None
-                
-            # Sign transaction
-            signed_tx = await self._sign_transaction(tx)
-            if not signed_tx:
-                return None
+                # Try with a conservative gas limit
+                tx['gas'] = 500000
                 
             return tx
             
@@ -426,14 +575,14 @@ class TransactionBuilder:
         """Build flash loan specific transaction parameters"""
         try:
             provider = opportunity['flash_loan_provider']
-            provider_config = self._get_provider_config(provider)
+            provider_config = await self._get_provider_config(provider)
             
             return {
                 'to': provider_config['router'],
-                'data': self._encode_flash_loan_data(
+                'data': await self._encode_flash_loan_data(
                     opportunity['token_pair'][0],
                     opportunity['amount'],
-                    opportunity['dex_weights']
+                    opportunity.get('dex_weights', {})
                 ),
                 'value': Wei(0)  # Flash loans don't require ETH
             }
@@ -448,12 +597,14 @@ class TransactionBuilder:
     ) -> TxParams:
         """Build regular arbitrage transaction parameters"""
         try:
+            router_address = await self._get_router_address()
+            
             return {
-                'to': self._get_router_address(),
-                'data': self._encode_swap_data(
+                'to': router_address,
+                'data': await self._encode_swap_data(
                     opportunity['token_pair'],
                     opportunity['amount'],
-                    opportunity['path']
+                    opportunity.get('path', [])
                 ),
                 'value': Wei(opportunity.get('value', 0))
             }
@@ -462,12 +613,23 @@ class TransactionBuilder:
             logger.error(f"Error building regular arb tx: {str(e)}")
             raise
             
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((ValueError, ConnectionError))
+    )
     async def _get_optimal_gas_price(self) -> int:
         """Get optimal gas price with current network conditions"""
         try:
-            block = self.web3.eth.get_block('latest')
-            base_fee = block.get('baseFeePerGas', self.web3.eth.gas_price)
-            priority_fee = self.web3.eth.max_priority_fee
+            if self.gas_manager:
+                # Use gas manager if available
+                gas_settings = await self.gas_manager.optimize_gas_settings({})
+                return gas_settings.get('gasPrice', self.web3.eth.gas_price)
+            
+            # Fallback implementation
+            block = await self.web3.eth.get_block('latest')
+            base_fee = block.get('baseFeePerGas', await self.web3.eth.gas_price)
+            priority_fee = await self.web3.eth.max_priority_fee
             
             # Add 20% buffer to base fee
             return int(base_fee * 1.2) + priority_fee
@@ -475,21 +637,28 @@ class TransactionBuilder:
         except Exception as e:
             logger.error(f"Error getting gas price: {str(e)}")
             # Fallback to network gas price
-            return self.web3.eth.gas_price
+            return await self.web3.eth.gas_price
             
     async def _get_nonce(self) -> int:
         """Get next nonce for the account"""
         account = self.web3.to_checksum_address(str(self.web3.eth.default_account))
-        return self.web3.eth.get_transaction_count(
+        return await self.web3.eth.get_transaction_count(
             account,
             'pending'
         )
         
     async def _estimate_gas(self, tx: TxParams) -> int:
         """Estimate gas for transaction"""
-        return self.web3.eth.estimate_gas(tx)
+        # Create a copy of tx for estimation
+        est_tx = dict(tx)
         
-    async def _sign_transaction(self, tx: TxParams) -> Optional[bytes]:
+        # Remove EIP-1559 specific fields for estimation if needed
+        if 'maxFeePerGas' in est_tx and 'gasPrice' not in est_tx:
+            est_tx['gasPrice'] = est_tx['maxFeePerGas']
+            
+        return await self.web3.eth.estimate_gas(est_tx)
+        
+    async def sign_transaction(self, tx: TxParams) -> Optional[bytes]:
         """Sign transaction with account key"""
         try:
             private_key = os.getenv('MAINNET_PRIVATE_KEY')
@@ -504,37 +673,60 @@ class TransactionBuilder:
             logger.error(f"Error signing transaction: {str(e)}")
             return None
             
-    def _encode_flash_loan_data(
+    @lru_cache(maxsize=10)
+    def _load_abi_from_file(self, abi_name: str) -> List:
+        """Load ABI from file with caching"""
+        try:
+            abi_path = Path(self.config.get('abi_directory', './abis')) / f"{abi_name}.json"
+            with open(abi_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading ABI {abi_name}: {str(e)}")
+            return []
+            
+    async def _encode_flash_loan_data(
         self,
         token: Address,
         amount: int,
         dex_weights: Dict[str, float]
     ) -> bytes:
         """Encode flash loan function call data"""
+        abi = self._load_abi_from_file('flash_loan')
         return self.web3.eth.contract(
-            abi=self._get_flash_loan_abi()
+            abi=abi
         ).encode_abi(
             fn_name='flashLoan',
             args=[token, amount, dex_weights]
         )
         
-    def _encode_swap_data(
+    async def _encode_swap_data(
         self,
         token_pair: Tuple[Address, Address],
         amount: int,
         path: List[Address]
     ) -> bytes:
         """Encode swap function call data"""
+        abi = self._load_abi_from_file('router')
+        
+        # If path is empty, create a default path from token pair
+        if not path:
+            path = [token_pair[0], token_pair[1]]
+            
         return self.web3.eth.contract(
-            abi=self._get_router_abi()
+            abi=abi
         ).encode_abi(
             fn_name='swapExactTokensForTokens',
             args=[amount, 0, path, self.web3.eth.default_account, int(time.time()) + 300]
         )
         
-    def _get_provider_config(self, provider: str) -> Dict:
+    async def _get_provider_config(self, provider: str) -> Dict:
         """Get configuration for flash loan provider"""
-        # This would be loaded from config in practice
+        # Try to load from config first
+        provider_configs = self.config.get('flash_loan_providers', {})
+        if provider in provider_configs:
+            return provider_configs[provider]
+            
+        # Fallback to hardcoded values
         return {
             'aave': {
                 'router': '0x...',
@@ -550,17 +742,17 @@ class TransactionBuilder:
             }
         }[provider]
         
-    def _get_router_address(self) -> ChecksumAddress:
+    async def _get_router_address(self) -> ChecksumAddress:
         """Get router contract address"""
-        # This would be loaded from config in practice
+        # Try to load from config first
+        router_address = self.config.get('router_address')
+        if router_address:
+            return Web3.to_checksum_address(router_address)
+            
+        # Fallback to hardcoded value
         return Web3.to_checksum_address('0x...')
         
-    def _get_flash_loan_abi(self) -> List:
-        """Get flash loan contract ABI"""
-        # This would be loaded from file in practice
-        return []
-        
-    def _get_router_abi(self) -> List:
-        """Get router contract ABI"""
-        # This would be loaded from file in practice
-        return [] 
+    async def cleanup(self) -> None:
+        """Clean up resources"""
+        if self._session and not self._session.closed:
+            await self._session.close() 

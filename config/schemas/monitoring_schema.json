@@ -1,0 +1,602 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Monitoring Configuration Schema",
+    "description": "Schema for monitoring configuration in the Flashing Base project",
+    "type": "object",
+    "required": ["version", "last_updated", "monitoring"],
+    "properties": {
+        "version": {
+            "type": "string",
+            "description": "Version of the monitoring configuration"
+        },
+        "last_updated": {
+            "type": "string",
+            "description": "Date when the configuration was last updated",
+            "format": "date"
+        },
+        "$schema": {
+            "type": "string",
+            "description": "JSON schema reference"
+        },
+        "monitoring": {
+            "type": "object",
+            "required": [
+                "metrics_interval",
+                "log_level",
+                "enable_metrics",
+                "prometheus_port",
+                "trade_cache_ttl",
+                "redis",
+                "storage",
+                "alert_thresholds",
+                "resource_thresholds",
+                "visualization",
+                "ml_config",
+                "alerts",
+                "logging",
+                "metrics"
+            ],
+            "properties": {
+                "metrics_interval": {
+                    "type": "integer",
+                    "description": "Interval in seconds for metrics collection",
+                    "minimum": 1
+                },
+                "log_level": {
+                    "type": "string",
+                    "description": "Logging level",
+                    "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+                },
+                "enable_metrics": {
+                    "type": "boolean",
+                    "description": "Whether to enable metrics collection"
+                },
+                "enable_tracing": {
+                    "type": "boolean",
+                    "description": "Whether to enable tracing"
+                },
+                "enable_profiling": {
+                    "type": "boolean",
+                    "description": "Whether to enable profiling"
+                },
+                "prometheus_port": {
+                    "type": "integer",
+                    "description": "Port for Prometheus metrics server",
+                    "minimum": 1,
+                    "maximum": 65535
+                },
+                "trade_cache_ttl": {
+                    "type": "integer",
+                    "description": "Time-to-live for trade cache in seconds",
+                    "minimum": 1
+                },
+                "redis": {
+                    "type": "object",
+                    "description": "Redis configuration",
+                    "required": ["host", "port", "db"],
+                    "properties": {
+                        "host": {
+                            "type": "string",
+                            "description": "Redis host"
+                        },
+                        "port": {
+                            "type": "integer",
+                            "description": "Redis port",
+                            "minimum": 1,
+                            "maximum": 65535
+                        },
+                        "db": {
+                            "type": "integer",
+                            "description": "Redis database number",
+                            "minimum": 0
+                        },
+                        "password": {
+                            "type": ["string", "null"],
+                            "description": "Redis password"
+                        }
+                    }
+                },
+                "storage": {
+                    "type": "object",
+                    "description": "Storage configuration",
+                    "required": ["base_path", "max_file_age_days"],
+                    "properties": {
+                        "base_path": {
+                            "type": "string",
+                            "description": "Base path for storage"
+                        },
+                        "max_file_age_days": {
+                            "type": "integer",
+                            "description": "Maximum age of files in days",
+                            "minimum": 1
+                        },
+                        "compression": {
+                            "type": "string",
+                            "description": "Compression algorithm",
+                            "enum": ["none", "gzip", "snappy", "lz4"]
+                        }
+                    }
+                },
+                "alert_thresholds": {
+                    "type": "object",
+                    "description": "Alert thresholds",
+                    "required": ["min_profit", "max_gas_price", "max_execution_time", "min_success_rate"],
+                    "properties": {
+                        "min_profit": {
+                            "type": "number",
+                            "description": "Minimum profit threshold"
+                        },
+                        "max_gas_price": {
+                            "type": "number",
+                            "description": "Maximum gas price",
+                            "minimum": 0
+                        },
+                        "max_execution_time": {
+                            "type": "number",
+                            "description": "Maximum execution time in seconds",
+                            "minimum": 0
+                        },
+                        "min_success_rate": {
+                            "type": "number",
+                            "description": "Minimum success rate percentage",
+                            "minimum": 0,
+                            "maximum": 100
+                        }
+                    }
+                },
+                "resource_thresholds": {
+                    "type": "object",
+                    "description": "Resource thresholds",
+                    "required": ["cpu", "memory", "disk", "network"],
+                    "properties": {
+                        "cpu": {
+                            "type": "object",
+                            "required": ["warning", "critical"],
+                            "properties": {
+                                "warning": {
+                                    "type": "number",
+                                    "description": "Warning threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                },
+                                "critical": {
+                                    "type": "number",
+                                    "description": "Critical threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                }
+                            }
+                        },
+                        "memory": {
+                            "type": "object",
+                            "required": ["warning", "critical"],
+                            "properties": {
+                                "warning": {
+                                    "type": "number",
+                                    "description": "Warning threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                },
+                                "critical": {
+                                    "type": "number",
+                                    "description": "Critical threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                }
+                            }
+                        },
+                        "disk": {
+                            "type": "object",
+                            "required": ["warning", "critical"],
+                            "properties": {
+                                "warning": {
+                                    "type": "number",
+                                    "description": "Warning threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                },
+                                "critical": {
+                                    "type": "number",
+                                    "description": "Critical threshold",
+                                    "minimum": 0,
+                                    "maximum": 100
+                                }
+                            }
+                        },
+                        "network": {
+                            "type": "object",
+                            "required": ["warning", "critical"],
+                            "properties": {
+                                "warning": {
+                                    "type": "number",
+                                    "description": "Warning threshold",
+                                    "minimum": 0
+                                },
+                                "critical": {
+                                    "type": "number",
+                                    "description": "Critical threshold",
+                                    "minimum": 0
+                                }
+                            }
+                        }
+                    }
+                },
+                "visualization": {
+                    "type": "object",
+                    "description": "Visualization configuration",
+                    "required": ["dashboard_port", "update_intervals", "chart_defaults"],
+                    "properties": {
+                        "dashboard_port": {
+                            "type": "integer",
+                            "description": "Dashboard port",
+                            "minimum": 1,
+                            "maximum": 65535
+                        },
+                        "update_intervals": {
+                            "type": "object",
+                            "description": "Update intervals",
+                            "required": ["fast", "medium", "slow"],
+                            "properties": {
+                                "fast": {
+                                    "type": "integer",
+                                    "description": "Fast update interval in seconds",
+                                    "minimum": 1
+                                },
+                                "medium": {
+                                    "type": "integer",
+                                    "description": "Medium update interval in seconds",
+                                    "minimum": 1
+                                },
+                                "slow": {
+                                    "type": "integer",
+                                    "description": "Slow update interval in seconds",
+                                    "minimum": 1
+                                }
+                            }
+                        },
+                        "chart_defaults": {
+                            "type": "object",
+                            "description": "Chart defaults",
+                            "required": ["height", "theme"],
+                            "properties": {
+                                "height": {
+                                    "type": "integer",
+                                    "description": "Chart height",
+                                    "minimum": 100
+                                },
+                                "theme": {
+                                    "type": "string",
+                                    "description": "Chart theme",
+                                    "enum": ["light", "dark"]
+                                }
+                            }
+                        }
+                    }
+                },
+                "ml_config": {
+                    "type": "object",
+                    "description": "Machine learning configuration",
+                    "required": ["profit_prediction", "anomaly_detection", "feature_generation", "analysis"],
+                    "properties": {
+                        "profit_prediction": {
+                            "type": "object",
+                            "description": "Profit prediction configuration",
+                            "required": ["window_size", "train_size", "feature_importance_threshold"],
+                            "properties": {
+                                "window_size": {
+                                    "type": "integer",
+                                    "description": "Window size",
+                                    "minimum": 1
+                                },
+                                "train_size": {
+                                    "type": "number",
+                                    "description": "Training set size ratio",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                },
+                                "feature_importance_threshold": {
+                                    "type": "number",
+                                    "description": "Feature importance threshold",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                }
+                            }
+                        },
+                        "anomaly_detection": {
+                            "type": "object",
+                            "description": "Anomaly detection configuration",
+                            "required": ["contamination", "n_estimators", "max_features"],
+                            "properties": {
+                                "contamination": {
+                                    "type": "number",
+                                    "description": "Contamination ratio",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                },
+                                "n_estimators": {
+                                    "type": "integer",
+                                    "description": "Number of estimators",
+                                    "minimum": 1
+                                },
+                                "max_features": {
+                                    "type": "number",
+                                    "description": "Maximum features ratio",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                }
+                            }
+                        },
+                        "feature_generation": {
+                            "type": "object",
+                            "description": "Feature generation configuration",
+                            "required": ["lookback_periods", "rolling_windows", "min_samples"],
+                            "properties": {
+                                "lookback_periods": {
+                                    "type": "array",
+                                    "description": "Lookback periods",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^\\d+[smhd]$"
+                                    }
+                                },
+                                "rolling_windows": {
+                                    "type": "array",
+                                    "description": "Rolling windows",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^\\d+[smhd]$"
+                                    }
+                                },
+                                "min_samples": {
+                                    "type": "integer",
+                                    "description": "Minimum samples",
+                                    "minimum": 1
+                                }
+                            }
+                        },
+                        "analysis": {
+                            "type": "object",
+                            "description": "Analysis configuration",
+                            "required": ["correlation_threshold", "significance_level", "min_profit_threshold"],
+                            "properties": {
+                                "correlation_threshold": {
+                                    "type": "number",
+                                    "description": "Correlation threshold",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                },
+                                "significance_level": {
+                                    "type": "number",
+                                    "description": "Significance level",
+                                    "minimum": 0,
+                                    "maximum": 1
+                                },
+                                "min_profit_threshold": {
+                                    "type": "number",
+                                    "description": "Minimum profit threshold"
+                                }
+                            }
+                        }
+                    }
+                },
+                "alerts": {
+                    "type": "object",
+                    "description": "Alerts configuration",
+                    "required": ["enabled", "channels"],
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Whether alerts are enabled"
+                        },
+                        "channels": {
+                            "type": "object",
+                            "description": "Alert channels",
+                            "required": ["slack", "telegram", "email"],
+                            "properties": {
+                                "slack": {
+                                    "type": "object",
+                                    "description": "Slack configuration",
+                                    "required": ["enabled", "webhook_url"],
+                                    "properties": {
+                                        "enabled": {
+                                            "type": "boolean",
+                                            "description": "Whether Slack alerts are enabled"
+                                        },
+                                        "webhook_url": {
+                                            "type": ["string", "null"],
+                                            "description": "Slack webhook URL"
+                                        }
+                                    }
+                                },
+                                "telegram": {
+                                    "type": "object",
+                                    "description": "Telegram configuration",
+                                    "required": ["enabled", "bot_token", "chat_id"],
+                                    "properties": {
+                                        "enabled": {
+                                            "type": "boolean",
+                                            "description": "Whether Telegram alerts are enabled"
+                                        },
+                                        "bot_token": {
+                                            "type": ["string", "null"],
+                                            "description": "Telegram bot token"
+                                        },
+                                        "chat_id": {
+                                            "type": ["string", "null"],
+                                            "description": "Telegram chat ID"
+                                        }
+                                    }
+                                },
+                                "email": {
+                                    "type": "object",
+                                    "description": "Email configuration",
+                                    "required": ["enabled", "smtp_server", "smtp_port", "sender", "recipients"],
+                                    "properties": {
+                                        "enabled": {
+                                            "type": "boolean",
+                                            "description": "Whether email alerts are enabled"
+                                        },
+                                        "smtp_server": {
+                                            "type": ["string", "null"],
+                                            "description": "SMTP server"
+                                        },
+                                        "smtp_port": {
+                                            "type": "integer",
+                                            "description": "SMTP port",
+                                            "minimum": 1,
+                                            "maximum": 65535
+                                        },
+                                        "sender": {
+                                            "type": ["string", "null"],
+                                            "description": "Sender email address"
+                                        },
+                                        "recipients": {
+                                            "type": "array",
+                                            "description": "Recipient email addresses",
+                                            "items": {
+                                                "type": "string",
+                                                "format": "email"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "logging": {
+                    "type": "object",
+                    "description": "Logging configuration",
+                    "required": ["level", "format", "file", "console"],
+                    "properties": {
+                        "level": {
+                            "type": "string",
+                            "description": "Logging level",
+                            "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+                        },
+                        "format": {
+                            "type": "string",
+                            "description": "Logging format",
+                            "enum": ["text", "json", "structured"]
+                        },
+                        "file": {
+                            "type": "object",
+                            "description": "File logging configuration",
+                            "required": ["enabled", "path", "max_size_mb", "backup_count"],
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "description": "Whether file logging is enabled"
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "Log file path"
+                                },
+                                "max_size_mb": {
+                                    "type": "integer",
+                                    "description": "Maximum log file size in MB",
+                                    "minimum": 1
+                                },
+                                "backup_count": {
+                                    "type": "integer",
+                                    "description": "Number of backup log files",
+                                    "minimum": 0
+                                }
+                            }
+                        },
+                        "console": {
+                            "type": "object",
+                            "description": "Console logging configuration",
+                            "required": ["enabled", "color"],
+                            "properties": {
+                                "enabled": {
+                                    "type": "boolean",
+                                    "description": "Whether console logging is enabled"
+                                },
+                                "color": {
+                                    "type": "boolean",
+                                    "description": "Whether to use colored output"
+                                }
+                            }
+                        }
+                    }
+                },
+                "metrics": {
+                    "type": "object",
+                    "description": "Metrics configuration",
+                    "required": ["collection", "retention", "aggregation"],
+                    "properties": {
+                        "collection": {
+                            "type": "object",
+                            "description": "Metrics collection configuration",
+                            "required": ["system_resources", "trade_performance", "strategy_analysis", "gas_optimization"],
+                            "properties": {
+                                "system_resources": {
+                                    "type": "boolean",
+                                    "description": "Whether to collect system resource metrics"
+                                },
+                                "trade_performance": {
+                                    "type": "boolean",
+                                    "description": "Whether to collect trade performance metrics"
+                                },
+                                "strategy_analysis": {
+                                    "type": "boolean",
+                                    "description": "Whether to collect strategy analysis metrics"
+                                },
+                                "gas_optimization": {
+                                    "type": "boolean",
+                                    "description": "Whether to collect gas optimization metrics"
+                                }
+                            }
+                        },
+                        "retention": {
+                            "type": "object",
+                            "description": "Metrics retention configuration",
+                            "required": ["high_resolution", "medium_resolution", "low_resolution"],
+                            "properties": {
+                                "high_resolution": {
+                                    "type": "string",
+                                    "description": "High resolution retention period",
+                                    "pattern": "^\\d+[smhd]$"
+                                },
+                                "medium_resolution": {
+                                    "type": "string",
+                                    "description": "Medium resolution retention period",
+                                    "pattern": "^\\d+[smhd]$"
+                                },
+                                "low_resolution": {
+                                    "type": "string",
+                                    "description": "Low resolution retention period",
+                                    "pattern": "^\\d+[smhd]$"
+                                }
+                            }
+                        },
+                        "aggregation": {
+                            "type": "object",
+                            "description": "Metrics aggregation configuration",
+                            "required": ["intervals", "functions"],
+                            "properties": {
+                                "intervals": {
+                                    "type": "array",
+                                    "description": "Aggregation intervals",
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^\\d+[smhd]$"
+                                    }
+                                },
+                                "functions": {
+                                    "type": "array",
+                                    "description": "Aggregation functions",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["mean", "sum", "min", "max", "count", "median", "p90", "p95", "p99"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+} 

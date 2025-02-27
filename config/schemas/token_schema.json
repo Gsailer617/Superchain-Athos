@@ -1,0 +1,55 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Token Configuration Schema",
+    "description": "Schema for token configuration in the Flashing Base project",
+    "type": "object",
+    "required": ["version", "last_updated", "tokens"],
+    "properties": {
+        "version": {
+            "type": "string",
+            "description": "Version of the token configuration"
+        },
+        "last_updated": {
+            "type": "string",
+            "description": "Date when the configuration was last updated",
+            "format": "date"
+        },
+        "tokens": {
+            "type": "object",
+            "description": "Map of token symbols to token details",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["symbol", "address", "decimals", "chain"],
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Token symbol"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Token name"
+                    },
+                    "address": {
+                        "type": "string",
+                        "description": "Token contract address",
+                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                    },
+                    "decimals": {
+                        "type": "integer",
+                        "description": "Number of decimals for the token",
+                        "minimum": 0,
+                        "maximum": 18
+                    },
+                    "is_native_wrapped": {
+                        "type": "boolean",
+                        "description": "Whether this token is a wrapped version of the native chain token"
+                    },
+                    "chain": {
+                        "type": "string",
+                        "description": "Chain on which this token exists"
+                    }
+                }
+            }
+        }
+    }
+} 

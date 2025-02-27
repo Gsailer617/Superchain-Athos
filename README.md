@@ -1,444 +1,167 @@
-# Superchain Arbitrage Agent
+# Flashing Base - DeFi Automation System
 
-An advanced AI-powered arbitrage bot for discovering and executing arbitrage opportunities across multiple DEXes on Base (Superchain).
+A comprehensive DeFi automation system for arbitrage opportunity discovery, yield farming management, and portfolio optimization.
+
+## Overview
+
+Flashing Base is a powerful DeFi automation platform that combines arbitrage opportunity discovery with yield farming management to maximize returns while managing risk. The system uses advanced algorithms to identify profitable trading opportunities across multiple chains and protocols, and provides tools for portfolio optimization and performance tracking.
 
 ## Features
 
-### DEX Support
-- Uniswap V3
-- SushiSwap
-- BaseSwap
-- Aerodrome
-- PancakeSwap
-- SwapBased
-- AlienBase
-- Maverick
-- SynthSwap
-- Horizon DEX
+### Arbitrage
 
-### Core Features
-- Real-time arbitrage opportunity detection
-- Machine learning-based profit prediction
-- Flash loan integration
-- Risk management system
-- Automated trading execution
+- **Multi-DEX Arbitrage**: Identify price discrepancies across multiple decentralized exchanges
+- **Flash Loan Arbitrage**: Execute arbitrage opportunities using flash loans for capital efficiency
+- **Triangular Arbitrage**: Find profitable trading paths between multiple tokens
+- **Cross-Chain Arbitrage**: Discover opportunities across different blockchain networks
+- **Risk Assessment**: Evaluate opportunities based on risk factors and expected profitability
+- **Automated Execution**: Execute trades automatically with configurable parameters
 
-### Enhanced LLM Integration
-- Real-time opportunity analysis with HuggingFace models
-- Market sentiment analysis and insights
-- Performance metrics analysis
-- Error analysis and recovery suggestions
-- Trading strategy recommendations
-- Dynamic market condition assessment
+### Yield Farming
 
-### Advanced Telegram Bot Features
-- Real-time notifications with LLM-powered insights
-- Interactive command system:
-  - `/explain` - Get detailed analysis of latest opportunities
-  - `/analyze` - Get performance metrics analysis
-  - `/insight` - Get market condition insights
-  - `/errors` - Get analysis of recent errors
-  - `/performance` - View performance metrics
-  - `/summary` - Get latest performance summary
-  - `/status` - Check bot status
-  - `/charts` - View performance charts
-- Enhanced error reporting with recovery suggestions
-- Performance tracking and visualization
-- Rate-limited notifications to prevent spam
-- Multi-admin support with role-based access
+- **Opportunity Discovery**: Find the best yield farming opportunities across protocols
+- **Position Management**: Create, monitor, and manage yield farming positions
+- **Auto-Compounding**: Automatically compound rewards for maximum returns
+- **Reward Harvesting**: Harvest rewards on optimal schedules
+- **Risk Assessment**: Evaluate protocols and pools based on security and stability
 
-### Analytics & Monitoring
-- Real-time performance tracking
-- Interactive visualization dashboard
-- Order book depth analysis
-- Token performance analytics
-- DEX performance metrics
-- Gas price optimization
-- Network health monitoring
-- Risk assessment system
+### Portfolio Management
 
-## Installation
-
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/superchain-arbitrage-agent.git
-cd superchain-arbitrage-agent
-```
-
-2. Create and activate a virtual environment:
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-4. Create a `.env` file with your credentials:
-```env
-# Required Variables
-TELEGRAM_BOT_TOKEN="your_bot_token"
-TELEGRAM_CHAT_ID="your_chat_id"
-TELEGRAM_ADMIN_IDS="comma,separated,admin,ids"
-PRIVATE_KEY="your_wallet_private_key"
-WEB3_PROVIDER_URI="your_web3_provider_uri"
-
-# Optional Variables
-LOG_LEVEL="INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-HF_API_KEY="your_huggingface_api_key"  # For LLM features
-DEFILLAMA_API_KEY="your_defillama_api_key"
-BASESCAN_API_KEY="your_basescan_api_key"
-BASE_MAINNET_RPC="your_base_mainnet_rpc"
-```
-
-## Usage
-
-1. Start the arbitrage agent:
-```bash
-python SuperchainArbitrageAgent.py
-```
-
-2. Access the visualization dashboard at `http://localhost:8050`
-
-3. Interact with the Telegram bot:
-- Start with `/startbot` command
-- Use `/help` to see available commands
-- Monitor notifications and insights
-- View performance analytics
-- Get LLM-powered analysis
-
-## Configuration
-
-### Risk Management
-- Adjust risk parameters in `risk_settings`
-- Configure slippage tolerance
-- Set gas price limits
-- Define profit thresholds
-- Set position size limits
-
-### DEX Settings
-- Configure supported DEXes in `supported_dexes`
-- Set fee tiers
-- Define liquidity thresholds
-- Configure price impact limits
-
-### LLM Settings
-- Configure model selection
-- Adjust response parameters
-- Set cache duration
-- Define rate limits
-
-### Telegram Bot Settings
-- Configure notification preferences
-- Set rate limits
-- Define admin roles
-- Customize alert thresholds
+- **Portfolio Allocation**: Get recommendations for optimal allocation between arbitrage, yield farming, and reserves
+- **Risk Profiles**: Choose from conservative, moderate, or aggressive risk profiles
+- **Performance Tracking**: Monitor returns, profits, and performance metrics
+- **Portfolio Optimization**: Rebalance portfolio based on changing market conditions
+- **Multi-Chain Support**: Manage assets across multiple blockchain networks
 
 ## Architecture
 
-### Core Components
-- Neural network model for opportunity prediction
-- DEX data collection and analysis system
-- Flash loan integration with multiple providers
-- Real-time monitoring and execution engine
+The system is built with a modular architecture using the Command Query Responsibility Segregation (CQRS) pattern and Domain-Driven Design principles:
 
-### Enhanced Features
-- LLM-powered analysis system
-- Advanced Telegram bot integration
-- Interactive analytics dashboard
-- Performance tracking system
+- **Core**: Foundational components including dependency injection, health monitoring, and configuration
+- **CQRS**: Command and query handling, event processing, and bulkhead pattern implementation
+- **Domain Models**: Rich domain models for tokens, arbitrage opportunities, and yield positions
+- **Services**: Business logic for arbitrage, yield farming, and portfolio management
+- **API**: RESTful API for integration with external systems
+- **CLI**: Command-line interface for easy interaction
 
-### Safety Features
-- Contract verification
-- Multi-layer validation
-- Risk assessment
-- Slippage protection
-- Gas optimization
-- Error handling and recovery
-- Rate limiting
-- Duplicate transaction prevention
+## Getting Started
 
-## Contributing
+### Prerequisites
 
-Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
+- Python 3.9+
+- Redis
+- Ethereum node access (Infura, Alchemy, or self-hosted)
 
-## License
+### Installation
 
-[MIT](https://choosealicense.com/licenses/mit/)
+1. Clone the repository:
+   ```
+   git clone https://github.com/yourusername/flashing-base.git
+   cd flashing-base
+   ```
 
-## Monitoring and Logging
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
 
-### Logging Levels
-- `DEBUG`: Detailed debugging information
-- `INFO`: General operational information
-- `WARNING`: Warning messages for potential issues
-- `ERROR`: Error events that might still allow the program to run
-- `CRITICAL`: Critical errors that may prevent proper operation
+3. Configure environment variables:
+   ```
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
 
-### Performance Monitoring
-- Real-time trade tracking
-- Gas usage optimization
-- Error rate monitoring
-- Success rate tracking
-- Profit/loss tracking
-- Network health monitoring
+4. Initialize the system:
+   ```
+   python -m src.main
+   ```
 
-### Analytics Dashboard
-- Real-time performance metrics
-- Historical data analysis
-- Token performance tracking
-- DEX comparison tools
-- Gas price trends
-- Market sentiment analysis
+### Using the API
 
-## Support
+The system provides a RESTful API for integration with external systems:
 
-For support, please open an issue in the repository or contact the development team through the provided channels.
+```
+# Start the API server
+python -m src.api.defi_api
+```
 
-# Supported Blockchains
+The API will be available at `http://localhost:8000`. See the API documentation for available endpoints.
 
-This project supports multiple blockchains for cross-chain arbitrage opportunities. Below are the details for each supported chain:
+### Using the CLI
 
-## Layer 1 Chains
+The system provides a command-line interface for easy interaction:
 
-### Ethereum
-- **Chain ID**: 1
-- **Block Time**: ~12 seconds
-- **Gas Model**: EIP-1559
-- **RPC Endpoint**: `ETHEREUM_RPC_URL` in .env
-- **Documentation**: [Ethereum Docs](https://ethereum.org/en/developers/docs/)
-- **Special Notes**: 
-  - Base layer for most L2s
-  - Highest security but also highest gas fees
-  - MEV protection via Flashbots
+```
+# List DeFi opportunities
+python -m src.cli.defi_cli opportunities list --wallet 0x123...
 
-### Polygon
-- **Chain ID**: 137
-- **Block Time**: ~2 seconds
-- **Gas Model**: EIP-1559
-- **RPC Endpoint**: `POLYGON_RPC_URL` in .env
-- **Documentation**: [Polygon Docs](https://docs.polygon.technology/tools/)
-- **Special Notes**:
-  - High throughput, low fees
-  - Requires monitoring MATIC token price for gas
-  - Multiple bridge options (PoS, Plasma)
+# Get portfolio allocation
+python -m src.cli.defi_cli portfolio allocation --wallet 0x123... --value 10000
 
-### BNB Chain
-- **Chain ID**: 56
-- **Block Time**: ~3 seconds
-- **Gas Model**: Legacy
-- **RPC Endpoint**: `BNB_RPC_URL` in .env
-- **Documentation**: [BNB Chain Docs](https://docs.bnbchain.org/bnb-smart-chain/)
-- **Special Notes**:
-  - High throughput
-  - Centralized validator set
-  - Multiple RPC endpoints recommended
+# Execute an arbitrage opportunity
+python -m src.cli.defi_cli arbitrage execute --id arb-123 --wallet 0x123...
 
-### Avalanche
-- **Chain ID**: 43114
-- **Block Time**: ~2 seconds
-- **Gas Model**: EIP-1559
-- **RPC Endpoint**: `AVALANCHE_RPC_URL` in .env
-- **Documentation**: [Avalanche Docs](https://build.avax.network/docs)
-- **Special Notes**:
-  - C-Chain for EVM compatibility
-  - Fast finality
-  - Subnet support
-
-### Gnosis
-- **Chain ID**: 100
-- **Block Time**: ~5 seconds
-- **Gas Model**: EIP-1559
-- **RPC Endpoint**: `GNOSIS_RPC_URL` in .env
-- **Documentation**: [Gnosis Docs](https://docs.gnosischain.com/developers/Overview)
-- **Special Notes**:
-  - xDAI as native token
-  - Stable token focus
-  - OmniBridge support
-
-## Layer 2 Chains
-
-### Base
-- **Chain ID**: 8453
-- **Block Time**: ~2 seconds
-- **Gas Model**: Optimistic
-- **RPC Endpoint**: `BASE_RPC_URL` in .env
-- **Documentation**: [Base Docs](https://docs.base.org/docs/)
-- **Special Notes**:
-  - Optimistic rollup
-  - 7-day withdrawal period
-  - Coinbase integration
-
-### Arbitrum
-- **Chain ID**: 42161
-- **Block Time**: ~250ms
-- **Gas Model**: Arbitrum-specific
-- **RPC Endpoint**: `ARBITRUM_RPC_URL` in .env
-- **Documentation**: [Arbitrum Docs](https://docs.arbitrum.io/welcome/get-started)
-- **Special Notes**:
-  - Nitro upgrade
-  - Complex gas pricing
-  - High throughput
-
-### Optimism
-- **Chain ID**: 10
-- **Block Time**: ~2 seconds
-- **Gas Model**: Optimistic
-- **RPC Endpoint**: `OPTIMISM_RPC_URL` in .env
-- **Documentation**: [Optimism Docs](https://docs.optimism.io/)
-- **Special Notes**:
-  - Bedrock upgrade
-  - Similar to Ethereum
-  - Strong infrastructure
-
-### Linea
-- **Chain ID**: 59144
-- **Block Time**: ~12 seconds
-- **Gas Model**: EIP-1559
-- **RPC Endpoint**: `LINEA_RPC_URL` in .env
-- **Documentation**: [Linea Docs](https://docs.linea.build/get-started)
-- **Special Notes**:
-  - ZK rollup
-  - ConsenSys backing
-  - ZK proof verification times
-
-### Mantle
-- **Chain ID**: 5000
-- **Block Time**: ~2 seconds
-- **Gas Model**: Optimistic
-- **RPC Endpoint**: `MANTLE_RPC_URL` in .env
-- **Documentation**: [Mantle Docs](https://docs.mantle.xyz/network)
-- **Special Notes**:
-  - Optimistic rollup
-  - Data availability
-  - MNT token incentives
-
-### Mode
-- **Chain ID**: 34443
-- **Block Time**: ~2 seconds
-- **Gas Model**: Mode-specific
-- **RPC Endpoint**: `MODE_RPC_URL` in .env
-- **Documentation**: [Mode Docs](https://docs.mode.network/)
-- **Special Notes**:
-  - Fixed priority fees
-  - Sequencer infrastructure
-  - Optimized for DeFi
-
-### Sonic
-- **Chain ID**: 8899
-- **Block Time**: ~1 second
-- **Gas Model**: Sonic-specific
-- **RPC Endpoint**: `SONIC_RPC_URL` in .env
-- **Documentation**: [Sonic Docs](https://docs.soniclabs.com/sonic/build-on-sonic/getting-started)
-- **Special Notes**:
-  - High performance
-  - Low latency
-  - Fixed gas fees
-
-## Bridge Support
-
-Each chain pair has specific bridge configurations and adapters:
-
-- **Canonical Bridges**: Official bridges between L1-L2 pairs
-- **Third-party Bridges**: Supported bridges include:
-  - LayerZero
-  - deBridge
-  - Across
-  - Superbridge
-  - OmniBridge (Gnosis)
-  - Plasma and PoS (Polygon)
+# Create a yield farming position
+python -m src.cli.defi_cli yield create --id yield-123 --wallet 0x123... --deposit "0xtoken:100"
+```
 
 ## Configuration
 
-All chain configurations are managed through environment variables. See `.env.example` for required variables.
+The system can be configured using environment variables or a configuration file:
 
-### Required Environment Variables
+- `CHAINS`: Comma-separated list of chain IDs to monitor (default: "1,56,137")
+- `MIN_PROFIT_USD`: Minimum profit threshold for arbitrage opportunities in USD (default: 10)
+- `MAX_GAS_PRICE_GWEI`: Maximum gas price to use for transactions in Gwei (default: 100)
+- `RISK_PROFILE`: Default risk profile (default: "moderate")
+- `AUTO_COMPOUND_THRESHOLD`: Threshold for auto-compounding rewards in USD (default: 50)
+- `HARVEST_INTERVAL_HOURS`: Interval for harvesting rewards in hours (default: 24)
 
-```bash
-# RPC URLs
-ETHEREUM_RPC_URL=
-BASE_RPC_URL=
-POLYGON_RPC_URL=
-ARBITRUM_RPC_URL=
-OPTIMISM_RPC_URL=
-BNB_RPC_URL=
-LINEA_RPC_URL=
-MANTLE_RPC_URL=
-AVALANCHE_RPC_URL=
-GNOSIS_RPC_URL=
-MODE_RPC_URL=
-SONIC_RPC_URL=
+See the configuration documentation for all available options.
 
-# Bridge Contract Addresses
-MODE_L1_BRIDGE=
-MODE_L2_BRIDGE=
-MODE_MESSAGE_SERVICE=
-SONIC_BRIDGE_ROUTER=
-SONIC_TOKEN_BRIDGE=
-SONIC_LIQUIDITY_POOL=
-# ... other bridge addresses
+## Development
+
+### Project Structure
+
+```
+flashing-base/
+├── src/
+│   ├── api/              # API endpoints
+│   ├── cli/              # Command-line interface
+│   ├── core/             # Core components
+│   ├── cqrs/             # CQRS implementation
+│   │   ├── commands/     # Command definitions and handlers
+│   │   ├── queries/      # Query definitions and handlers
+│   │   ├── events/       # Event definitions and handlers
+│   │   ├── bulkhead/     # Bulkhead pattern implementation
+│   │   └── handlers/     # Common handler interfaces
+│   ├── services/         # Business logic services
+│   └── main.py           # Application entry point
+├── tests/                # Test suite
+├── requirements.txt      # Dependencies
+└── README.md             # This file
 ```
 
-## Gas Management
+### Running Tests
 
-Each chain has specific gas management requirements:
+```
+pytest
+```
 
-- **EIP-1559 Chains**: Use base fee + priority fee
-- **Legacy Chains**: Use gas price only
-- **L2-specific**: Use custom gas models (Arbitrum, Optimism)
-- **Fixed Fee Chains**: Use predefined fees (Mode, Sonic)
+### Contributing
 
-## Performance Considerations
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Commit your changes: `git commit -am 'Add my feature'`
+4. Push to the branch: `git push origin feature/my-feature`
+5. Submit a pull request
 
-- Monitor block times and confirmation requirements
-- Account for bridge-specific delays
-- Consider gas token prices (ETH, MATIC, BNB, etc.)
-- Watch for network congestion
-- Monitor bridge liquidity
+## License
 
-## Adding New Chains
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-To add support for a new blockchain:
+## Acknowledgements
 
-1. Add chain configuration to `src/config/chain_configurations.py`
-2. Implement bridge adapter if needed
-3. Update gas management for chain-specific models
-4. Add chain-specific tests
-5. Update environment variables
-6. Test thoroughly on testnet before mainnet
-
-## Troubleshooting
-
-Common issues and solutions:
-
-### RPC Connection Issues
-- Verify RPC URL is correct and accessible
-- Check for rate limiting
-- Use fallback RPC providers
-
-### Gas Estimation Failures
-- Check chain-specific gas models
-- Verify gas token balance
-- Monitor network congestion
-
-### Bridge Transfer Issues
-- Verify bridge contract addresses
-- Check bridge liquidity
-- Monitor bridge status
-- Verify message proofs
-
-### Transaction Failures
-- Check nonce management
-- Verify gas settings
-- Monitor chain state
-
-## Resources
-
-- [Ethereum Gas Tracker](https://etherscan.io/gastracker)
-- [L2 Gas Fees](https://l2fees.info/)
-- [Bridge Monitor](https://bridges.llama.fi/)
-- [Chain Analytics](https://defillama.com/)
-
-For more detailed information, refer to each chain's official documentation linked above.
+- [Web3.py](https://web3py.readthedocs.io/) - Python library for interacting with Ethereum
+- [FastAPI](https://fastapi.tiangolo.com/) - Modern, fast web framework for building APIs
+- [Click](https://click.palletsprojects.com/) - Python package for creating command-line interfaces
+- [Rich](https://rich.readthedocs.io/) - Python library for rich text and beautiful formatting in the terminal

@@ -1,0 +1,233 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Tokens Configuration Schema",
+    "description": "Schema for token configuration in the Flashing Base project",
+    "type": "object",
+    "required": ["version", "last_updated", "tokens"],
+    "properties": {
+        "version": {
+            "type": "string",
+            "description": "Version of the tokens configuration"
+        },
+        "last_updated": {
+            "type": "string",
+            "description": "Date when the configuration was last updated",
+            "format": "date"
+        },
+        "$schema": {
+            "type": "string",
+            "description": "JSON schema reference"
+        },
+        "tokens": {
+            "type": "object",
+            "description": "Token configurations by symbol",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["address", "decimals", "symbol", "name", "chain_id"],
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Token contract address",
+                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                    },
+                    "decimals": {
+                        "type": "integer",
+                        "description": "Number of decimals for the token",
+                        "minimum": 0,
+                        "maximum": 18
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "Token symbol"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Token name"
+                    },
+                    "chain_id": {
+                        "type": "integer",
+                        "description": "Chain ID where the token is deployed",
+                        "minimum": 1
+                    },
+                    "coingecko_id": {
+                        "type": ["string", "null"],
+                        "description": "CoinGecko ID for price data"
+                    },
+                    "is_stable": {
+                        "type": "boolean",
+                        "description": "Whether the token is a stablecoin"
+                    },
+                    "is_wrapped_native": {
+                        "type": "boolean",
+                        "description": "Whether the token is wrapped native currency (e.g., WETH)"
+                    },
+                    "is_native": {
+                        "type": "boolean",
+                        "description": "Whether the token is the native currency (e.g., ETH)"
+                    },
+                    "liquidity_threshold": {
+                        "type": "number",
+                        "description": "Minimum liquidity threshold in USD",
+                        "minimum": 0
+                    },
+                    "price_impact_threshold": {
+                        "type": "number",
+                        "description": "Maximum acceptable price impact percentage",
+                        "minimum": 0,
+                        "maximum": 100
+                    },
+                    "max_slippage": {
+                        "type": "number",
+                        "description": "Maximum acceptable slippage percentage",
+                        "minimum": 0,
+                        "maximum": 100
+                    },
+                    "min_trade_amount_usd": {
+                        "type": "number",
+                        "description": "Minimum trade amount in USD",
+                        "minimum": 0
+                    },
+                    "max_trade_amount_usd": {
+                        "type": "number",
+                        "description": "Maximum trade amount in USD",
+                        "minimum": 0
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "description": "Priority for trading (lower is higher priority)",
+                        "minimum": 0
+                    },
+                    "tags": {
+                        "type": "array",
+                        "description": "Tags for categorizing tokens",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "pools": {
+                        "type": "array",
+                        "description": "Liquidity pools where this token is used",
+                        "items": {
+                            "type": "object",
+                            "required": ["dex", "pair_address", "pair_symbol"],
+                            "properties": {
+                                "dex": {
+                                    "type": "string",
+                                    "description": "DEX identifier"
+                                },
+                                "pair_address": {
+                                    "type": "string",
+                                    "description": "Pool contract address",
+                                    "pattern": "^0x[a-fA-F0-9]{40}$"
+                                },
+                                "pair_symbol": {
+                                    "type": "string",
+                                    "description": "Symbol of the trading pair"
+                                },
+                                "fee_tier": {
+                                    "type": ["integer", "null"],
+                                    "description": "Fee tier for the pool (in basis points)",
+                                    "minimum": 0
+                                },
+                                "liquidity_usd": {
+                                    "type": ["number", "null"],
+                                    "description": "Liquidity in USD",
+                                    "minimum": 0
+                                },
+                                "volume_24h_usd": {
+                                    "type": ["number", "null"],
+                                    "description": "24-hour trading volume in USD",
+                                    "minimum": 0
+                                },
+                                "is_stable_pair": {
+                                    "type": "boolean",
+                                    "description": "Whether this is a stable pair"
+                                }
+                            }
+                        }
+                    },
+                    "price_feeds": {
+                        "type": "object",
+                        "description": "Price feed configurations",
+                        "properties": {
+                            "chainlink": {
+                                "type": ["object", "null"],
+                                "description": "Chainlink price feed configuration",
+                                "required": ["address", "decimals", "heartbeat_seconds"],
+                                "properties": {
+                                    "address": {
+                                        "type": "string",
+                                        "description": "Chainlink price feed address",
+                                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                                    },
+                                    "decimals": {
+                                        "type": "integer",
+                                        "description": "Decimals in the price feed",
+                                        "minimum": 0
+                                    },
+                                    "heartbeat_seconds": {
+                                        "type": "integer",
+                                        "description": "Heartbeat interval in seconds",
+                                        "minimum": 1
+                                    }
+                                }
+                            },
+                            "uniswap_twap": {
+                                "type": ["object", "null"],
+                                "description": "Uniswap TWAP configuration",
+                                "required": ["pool_address", "base_token", "quote_token", "period"],
+                                "properties": {
+                                    "pool_address": {
+                                        "type": "string",
+                                        "description": "Uniswap pool address",
+                                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                                    },
+                                    "base_token": {
+                                        "type": "string",
+                                        "description": "Base token symbol"
+                                    },
+                                    "quote_token": {
+                                        "type": "string",
+                                        "description": "Quote token symbol"
+                                    },
+                                    "period": {
+                                        "type": "integer",
+                                        "description": "TWAP period in seconds",
+                                        "minimum": 1
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "risk_parameters": {
+                        "type": "object",
+                        "description": "Risk parameters for the token",
+                        "properties": {
+                            "volatility": {
+                                "type": ["number", "null"],
+                                "description": "Historical volatility",
+                                "minimum": 0
+                            },
+                            "market_cap_rank": {
+                                "type": ["integer", "null"],
+                                "description": "Market capitalization rank",
+                                "minimum": 1
+                            },
+                            "max_exposure_usd": {
+                                "type": ["number", "null"],
+                                "description": "Maximum exposure in USD",
+                                "minimum": 0
+                            },
+                            "risk_score": {
+                                "type": ["integer", "null"],
+                                "description": "Risk score (1-10, higher is riskier)",
+                                "minimum": 1,
+                                "maximum": 10
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+} 

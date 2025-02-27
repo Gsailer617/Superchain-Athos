@@ -7,8 +7,36 @@ from eth_typing import HexAddress
 from dataclasses import dataclass, field
 from enum import Enum
 import time
+import functools
+from urllib.error import URLError
+import json
 
 logger = logging.getLogger(__name__)
+
+# Error handling decorator
+def handle_bridge_errors(method):
+    """Decorator for handling common bridge-related errors"""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except URLError as e:
+            logger.error(f"Connection error in {self.__class__.__name__}.{method.__name__}: {str(e)}")
+            self._update_metrics(success=False, error=f"Connection error: {str(e)}")
+            raise
+        except TimeoutError as e:
+            logger.error(f"Timeout error in {self.__class__.__name__}.{method.__name__}: {str(e)}")
+            self._update_metrics(success=False, error=f"Timeout error: {str(e)}")
+            raise
+        except ValueError as e:
+            logger.error(f"Value error in {self.__class__.__name__}.{method.__name__}: {str(e)}")
+            self._update_metrics(success=False, error=f"Value error: {str(e)}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in {self.__class__.__name__}.{method.__name__}: {str(e)}")
+            self._update_metrics(success=False, error=f"Unexpected error: {str(e)}")
+            raise
+    return wrapper
 
 @dataclass
 class BridgeConfig:
@@ -114,27 +142,38 @@ class BridgeMetrics:
     error_count: Dict[str, int] = field(default_factory=dict)
 
 class BridgeAdapter(ABC):
-    """Enhanced base adapter incorporating all bridge protocol requirements"""
+    """Abstract base class for bridge adapters with common implementation"""
     
     def __init__(self, config: BridgeConfig, web3: Web3):
+        """Initialize the bridge adapter
+        
+        Args:
+            config: Bridge configuration
+            web3: Web3 instance for interacting with the blockchain
+        """
         self.config = config
         self.web3 = web3
         self.metrics = BridgeMetrics(
             liquidity=0.0,
             utilization=0.0,
-            success_rate=1.0,
+            success_rate=1.0,  # Start optimistic
             avg_transfer_time=0.0,
             failed_transfers=0,
             total_transfers=0
         )
+        self.last_updated = time.time()
         self._initialize_protocol()
     
     @abstractmethod
     def _initialize_protocol(self) -> None:
-        """Initialize protocol-specific components"""
+        """Initialize protocol-specific components
+        
+        This method should be implemented by each adapter to set up
+        protocol-specific components like contracts, endpoints, etc.
+        """
         pass
     
-    @abstractmethod
+    @handle_bridge_errors
     def validate_transfer(
         self,
         source_chain: str,
@@ -142,8 +181,40 @@ class BridgeAdapter(ABC):
         token: str,
         amount: float
     ) -> bool:
-        """Validate if transfer is possible"""
-        pass
+        """Validate if a cross-chain transfer is possible
+        
+        This base implementation performs common validation checks.
+        Subclasses should call super().validate_transfer() and then
+        perform protocol-specific validation.
+        
+        Args:
+            source_chain: Source chain ID
+            target_chain: Target chain ID
+            token: Token address or symbol
+            amount: Amount to transfer
+            
+        Returns:
+            True if transfer is valid, False otherwise
+        """
+        # Common validation logic
+        if source_chain not in self.config.supported_chains:
+            logger.warning(f"Source chain {source_chain} not supported")
+            return False
+            
+        if target_chain not in self.config.supported_chains:
+            logger.warning(f"Target chain {target_chain} not supported")
+            return False
+            
+        if amount < self.config.min_amount:
+            logger.warning(f"Amount {amount} below minimum {self.config.min_amount}")
+            return False
+            
+        if amount > self.config.max_amount:
+            logger.warning(f"Amount {amount} above maximum {self.config.max_amount}")
+            return False
+            
+        # Protocol-specific validation to be implemented by subclasses
+        return True
     
     @abstractmethod
     def estimate_fees(
@@ -153,7 +224,7 @@ class BridgeAdapter(ABC):
         token: str,
         amount: float
     ) -> Dict[str, float]:
-        """Estimate bridge fees"""
+        """Estimate fees for a cross-chain transfer"""
         pass
     
     @abstractmethod
@@ -162,7 +233,7 @@ class BridgeAdapter(ABC):
         source_chain: str,
         target_chain: str
     ) -> int:
-        """Estimate transfer time in seconds"""
+        """Estimate time for cross-chain message delivery in seconds"""
         pass
     
     @abstractmethod
@@ -174,7 +245,7 @@ class BridgeAdapter(ABC):
         amount: float,
         recipient: str
     ) -> TxParams:
-        """Prepare transfer transaction"""
+        """Prepare transaction parameters for a cross-chain transfer"""
         pass
     
     @abstractmethod
@@ -185,17 +256,34 @@ class BridgeAdapter(ABC):
         message_hash: str,
         proof: bytes
     ) -> bool:
-        """Verify cross-chain message"""
+        """Verify a cross-chain message delivery"""
         pass
     
-    @abstractmethod
+    @handle_bridge_errors
     def get_bridge_state(
         self,
         source_chain: str,
         target_chain: str
     ) -> BridgeState:
-        """Get current bridge operational state"""
-        pass
+        """Get the current state of the bridge
+        
+        Base implementation that can be extended by subclasses for
+        protocol-specific state checks.
+        
+        Args:
+            source_chain: Source chain ID
+            target_chain: Target chain ID
+            
+        Returns:
+            Current bridge state
+        """
+        # Check if chains are supported
+        if source_chain not in self.config.supported_chains or target_chain not in self.config.supported_chains:
+            return BridgeState.OFFLINE
+            
+        # Base implementation just returns ACTIVE
+        # Subclasses should override with protocol-specific checks
+        return BridgeState.ACTIVE
     
     @abstractmethod
     def monitor_liquidity(
@@ -203,7 +291,7 @@ class BridgeAdapter(ABC):
         chain: str,
         token: str
     ) -> float:
-        """Monitor bridge liquidity"""
+        """Monitor liquidity for a specific token on a chain"""
         pass
     
     @abstractmethod
@@ -213,7 +301,7 @@ class BridgeAdapter(ABC):
         target_chain: str,
         tx_hash: str
     ) -> Optional[str]:
-        """Attempt to recover failed transfer"""
+        """Attempt to recover a failed transfer"""
         pass
     
     def _update_metrics(
@@ -224,37 +312,51 @@ class BridgeAdapter(ABC):
         gas_cost: Optional[float] = None,
         fee_cost: Optional[float] = None
     ) -> None:
-        """Enhanced metrics update"""
+        """Update bridge metrics"""
+        # Update counters
         self.metrics.total_transfers += 1
         if not success:
             self.metrics.failed_transfers += 1
-            self.metrics.last_error = error
             if error:
-                self.metrics.error_count[error] = self.metrics.error_count.get(error, 0) + 1
+                if error not in self.metrics.error_count:
+                    self.metrics.error_count[error] = 0
+                self.metrics.error_count[error] += 1
+                self.metrics.last_error = error
         
-        self.metrics.success_rate = (
-            (self.metrics.total_transfers - self.metrics.failed_transfers) /
-            self.metrics.total_transfers
+        # Update times
+        if transfer_time is not None:
+            # Weighted average for transfer time
+            if self.metrics.avg_transfer_time == 0:
+                self.metrics.avg_transfer_time = transfer_time
+            else:
+                self.metrics.avg_transfer_time = (
+                    self.metrics.avg_transfer_time * 0.9 + transfer_time * 0.1
+                )
+        
+        # Update costs
+        if gas_cost is not None:
+            if self.metrics.avg_gas_cost == 0:
+                self.metrics.avg_gas_cost = gas_cost
+            else:
+                self.metrics.avg_gas_cost = (
+                    self.metrics.avg_gas_cost * 0.9 + gas_cost * 0.1
+                )
+                
+        if fee_cost is not None:
+            if self.metrics.avg_fee_cost == 0:
+                self.metrics.avg_fee_cost = fee_cost
+            else:
+                self.metrics.avg_fee_cost = (
+                    self.metrics.avg_fee_cost * 0.9 + fee_cost * 0.1
+                )
+        
+        # Update success rate
+        self.metrics.success_rate = 1.0 - (
+            self.metrics.failed_transfers / self.metrics.total_transfers
+            if self.metrics.total_transfers > 0 else 0
         )
         
-        if transfer_time:
-            self.metrics.avg_transfer_time = (
-                (self.metrics.avg_transfer_time * (self.metrics.total_transfers - 1) + transfer_time) /
-                self.metrics.total_transfers
-            )
-        
-        if gas_cost:
-            self.metrics.avg_gas_cost = (
-                (self.metrics.avg_gas_cost * (self.metrics.total_transfers - 1) + gas_cost) /
-                self.metrics.total_transfers
-            )
-        
-        if fee_cost:
-            self.metrics.avg_fee_cost = (
-                (self.metrics.avg_fee_cost * (self.metrics.total_transfers - 1) + fee_cost) /
-                self.metrics.total_transfers
-            )
-        
+        # Update timestamp
         self.metrics.last_updated = time.time()
 
 class LayerZeroAdapter(BridgeAdapter):

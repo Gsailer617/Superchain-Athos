@@ -1825,25 +1825,24 @@ contract FlashLoanArbitrage is
         pancakeV3Fees[3] = 10000; // 1%
 
         // Initialize Maverick fee tiers
-        uint24[] memory maverickFees = new uint24[](4);
+        uint24[] memory maverickFees = new uint24[](3);
         maverickFees[0] = 100;   // 0.01%
         maverickFees[1] = 500;   // 0.05%
         maverickFees[2] = 3000;  // 0.3%
-        maverickFees[3] = 10000; // 1%
 
         // Configure UniswapV3-style DEXes
-        _configureDex("uniswap", 0x198EF79F1F515F02dFE9e3115eD9fC07183f02fC, DexType.UniswapV3, uniV3Fees, false);
-        _configureDex("sushiswap", 0x6BDED42c6DA8FD5E8B11852d05597c0F7C8D8E86, DexType.UniswapV3, uniV3Fees, false);
+        _configureDex("uniswap", 0x2626664c2603336E57B271c5C0b26F421741e481, DexType.UniswapV3, uniV3Fees, false);
+        _configureDex("sushiswap", 0x6BDED42c6DA8FD5E8B11852d05692eE20717c7fE, DexType.UniswapV3, uniV3Fees, false);
         _configureDex("pancakeswap", 0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86, DexType.UniswapV3, pancakeV3Fees, false);
-        _configureDex("maverick", 0x32D02fc7722E81f6aC6bd1b70eF5277ed3566fB9, DexType.Maverick, maverickFees, false);
+        _configureDex("maverick", 0x32AED3Bce901DA12ca8489788F3A99fCe1056e14, DexType.Maverick, maverickFees, false);
 
         // Configure UniswapV2-style DEXes
         _configureDex("baseswap", 0x327Df1E6de05895d2ab08513aaDD9313Fe505d86, DexType.UniswapV2, emptyFees, false);
-        _configureDex("alienbase", 0xb0505d78A2A6D49fa6e4905Ba9d6efC472B642C2, DexType.UniswapV2, emptyFees, false);
-        _configureDex("swapbased", 0x327Df1E6de05895d2ab08513aaDD9313Fe505d86, DexType.UniswapV2, emptyFees, false);
+        _configureDex("alienbase", 0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7, DexType.UniswapV2, emptyFees, false);
+        _configureDex("swapbased", 0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066, DexType.UniswapV2, emptyFees, false);
         _configureDex("aerodrome", 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43, DexType.UniswapV2, emptyFees, false);
-        _configureDex("synthswap", 0x5589D08C49cdDDF48Bb9F6e648C587d5d4533B28, DexType.UniswapV2, emptyFees, false);
-        _configureDex("horizondex", 0xE8c1365e4EF99F8BF69c5bB34eA54B622a43F367, DexType.UniswapV2, emptyFees, false);
+        _configureDex("synthswap", 0x7C2c7E7bA4Df5101931bF49C5c2Eb4d9c59D9F0b, DexType.UniswapV2, emptyFees, false);
+        _configureDex("velocore", 0x85E8262849Cd8479A3Cd0D1DaB5886D51E585E28, DexType.UniswapV2, emptyFees, false);
 
         // Emit DEX initialization event
         emit DexConfigsInitialized();

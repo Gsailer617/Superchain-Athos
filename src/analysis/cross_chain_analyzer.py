@@ -171,19 +171,259 @@ class PerformanceMetrics:
         return sum(self.operation_times[operation]) / len(self.operation_times[operation])
 
 class CrossChainAnalyzer:
-    """Analyzes cross-chain opportunities and market conditions"""
+    """
+    Advanced cross-chain analysis including:
+    - Cross-chain price discrepancies
+    - Bridge performance monitoring
+    - Gas cost analysis
+    - Machine learning based predictions
+    """
     
     def __init__(self):
-        """Initialize cross-chain analyzer"""
-        self.chain_connector = get_chain_connector()
+        # Initialize existing components
+        self.performance_metrics = PerformanceMetrics()
         self.chain_registry = get_chain_registry()
         self.price_feed_registry = PriceFeedRegistry()
-        self.bridge_liquidity_cache = {}
-        self.price_cache = {}
-        self.gas_estimates_cache = {}
-        self.metrics = PerformanceMetrics()
+        self.cache = {}
         self._setup_error_handlers()
         
+        # ML model tracking
+        self.model_initialized = False
+        self.prediction_accuracy = {}
+        self.last_model_update = 0
+        self.prediction_history = []
+        self.features_importance = {}
+        
+        # Adaptive learning config
+        self.ml_config = {
+            'min_data_points': 50,
+            'update_frequency': 86400,  # 24 hours
+            'features': [
+                'price_diff', 'bridge_fee', 'gas_cost', 
+                'transfer_time', 'liquidity', 'historical_success',
+                'network_congestion', 'price_volatility'
+            ],
+            'max_history_size': 1000,
+            'accuracy_threshold': 0.7
+        }
+        
+        # Initialize the ML pipeline
+        self._setup_ml_pipeline()
+        
+    def _setup_ml_pipeline(self):
+        """Setup the machine learning pipeline for opportunity prediction"""
+        try:
+            import numpy as np
+            import pandas as pd
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.pipeline import Pipeline
+            from sklearn.model_selection import train_test_split
+            
+            # Initialize ML components
+            self.scaler = StandardScaler()
+            self.model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=10,
+                random_state=42,
+                n_jobs=-1
+            )
+            
+            # Create pipeline
+            self.ml_pipeline = Pipeline([
+                ('scaler', self.scaler),
+                ('model', self.model)
+            ])
+            
+            logger.info("Machine learning pipeline initialized successfully")
+            
+        except ImportError:
+            logger.warning("Machine learning libraries not available, prediction features disabled")
+            self.model_initialized = False
+            
+    async def _update_ml_model(self):
+        """Update the machine learning model with latest data"""
+        if len(self.prediction_history) < self.ml_config['min_data_points']:
+            logger.debug(f"Not enough data to train model: {len(self.prediction_history)}/{self.ml_config['min_data_points']}")
+            return False
+            
+        # Check if update is needed
+        current_time = time.time()
+        if (current_time - self.last_model_update < self.ml_config['update_frequency'] and 
+            self.model_initialized):
+            return True
+            
+        try:
+            import numpy as np
+            import pandas as pd
+            
+            # Convert history to dataframe
+            df = pd.DataFrame(self.prediction_history)
+            
+            # Prepare features and target
+            X = df[self.ml_config['features']]
+            y = df['actual_profit']
+            
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            
+            # Train model
+            self.ml_pipeline.fit(X_train, y_train)
+            
+            # Evaluate model
+            score = self.ml_pipeline.score(X_test, y_test)
+            logger.info(f"Model trained with accuracy: {score:.4f}")
+            
+            # Update feature importance
+            self.features_importance = dict(zip(
+                self.ml_config['features'],
+                self.model.feature_importances_
+            ))
+            
+            self.model_initialized = True
+            self.last_model_update = current_time
+            self.prediction_accuracy['overall'] = score
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating ML model: {e}")
+            return False
+            
+    async def predict_opportunity_profit(self, opportunity_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Predict the profit potential of an opportunity using the trained model
+        
+        Args:
+            opportunity_data: Dictionary containing opportunity features
+            
+        Returns:
+            Dictionary with predicted profit and confidence
+        """
+        if not self.model_initialized:
+            await self._update_ml_model()
+            
+            # If still not initialized, fall back to heuristic
+            if not self.model_initialized:
+                return self._calculate_profit_heuristic(opportunity_data)
+                
+        try:
+            import numpy as np
+            import pandas as pd
+            
+            # Extract features
+            features = {}
+            for feature in self.ml_config['features']:
+                features[feature] = opportunity_data.get(feature, 0)
+                
+            # Convert to dataframe
+            df = pd.DataFrame([features])
+            
+            # Make prediction
+            predicted_profit = self.ml_pipeline.predict(df)[0]
+            
+            # Calculate confidence based on prediction history
+            confidence = self._calculate_prediction_confidence(features)
+            
+            return {
+                'predicted_profit': predicted_profit,
+                'confidence': confidence,
+                'method': 'ml_model',
+                'feature_importance': self.features_importance
+            }
+            
+        except Exception as e:
+            logger.error(f"Error predicting opportunity profit: {e}")
+            return self._calculate_profit_heuristic(opportunity_data)
+            
+    def _calculate_prediction_confidence(self, features: Dict[str, float]) -> float:
+        """Calculate confidence score for a prediction based on similar past predictions"""
+        import numpy as np
+        from scipy.spatial.distance import cdist
+        
+        if not self.prediction_history:
+            return 0.5
+            
+        try:
+            # Convert current features and history to arrays
+            current = np.array([[v for v in features.values()]])
+            
+            # Extract feature vectors from history
+            historical_features = np.array([
+                [entry.get(feature, 0) for feature in features.keys()]
+                for entry in self.prediction_history
+            ])
+            
+            # Calculate distances to historical predictions
+            distances = cdist(current, historical_features, 'euclidean')[0]
+            
+            # Find similar predictions (lowest distances)
+            most_similar_idx = np.argsort(distances)[:10]  # Top 10 similar situations
+            
+            # Calculate accuracy on similar situations
+            similar_predictions = [self.prediction_history[i] for i in most_similar_idx]
+            prediction_errors = [
+                abs(p.get('predicted_profit', 0) - p.get('actual_profit', 0)) / max(p.get('actual_profit', 1), 1)
+                for p in similar_predictions if 'actual_profit' in p
+            ]
+            
+            if not prediction_errors:
+                return 0.6  # Default confidence if no similar situations
+                
+            # Convert error to confidence (lower error = higher confidence)
+            avg_error = np.mean(prediction_errors)
+            confidence = max(0.1, min(0.95, 1.0 - avg_error))
+            
+            return confidence
+            
+        except Exception as e:
+            logger.error(f"Error calculating prediction confidence: {e}")
+            return 0.5  # Default confidence on error
+            
+    def _calculate_profit_heuristic(self, opportunity_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate profit using heuristic methods when ML is not available"""
+        price_diff = opportunity_data.get('price_diff', 0)
+        amount = opportunity_data.get('amount', 0)
+        bridge_fee = opportunity_data.get('bridge_fee', 0)
+        gas_cost = opportunity_data.get('gas_cost', 0)
+        
+        # Simple profit calculation
+        gross_profit = price_diff * amount
+        net_profit = gross_profit - bridge_fee - gas_cost
+        
+        # Risk adjustment
+        price_volatility = opportunity_data.get('price_volatility', 0.05)
+        transfer_time = opportunity_data.get('transfer_time', 60)
+        
+        # Adjust profit expectation based on risk
+        risk_factor = price_volatility * (transfer_time / 60)  # Normalized for 1 hour
+        risk_adjusted_profit = net_profit * (1 - risk_factor)
+        
+        return {
+            'predicted_profit': risk_adjusted_profit,
+            'confidence': 0.5,  # Medium confidence for heuristic
+            'method': 'heuristic',
+            'risk_factor': risk_factor
+        }
+        
+    def update_prediction_history(self, prediction: Dict[str, Any], actual_result: Dict[str, Any]):
+        """Update prediction history with actual results for model improvement"""
+        # Combine prediction with actual result
+        entry = {**prediction}
+        entry['actual_profit'] = actual_result.get('profit', 0)
+        entry['timestamp'] = time.time()
+        
+        # Add to history
+        self.prediction_history.append(entry)
+        
+        # Trim history if needed
+        if len(self.prediction_history) > self.ml_config['max_history_size']:
+            # Remove oldest entries
+            excess = len(self.prediction_history) - self.ml_config['max_history_size']
+            self.prediction_history = self.prediction_history[excess:]
+    
     def _setup_error_handlers(self) -> None:
         """Setup custom error handlers for different scenarios"""
         self.error_handlers = {
@@ -196,10 +436,10 @@ class CrossChainAnalyzer:
     async def _handle_connection_error(self, chain: str, error: Exception) -> None:
         """Handle chain connection errors"""
         logger.error(f"Connection error for chain {chain}: {str(error)}")
-        metrics = self.metrics.chain_metrics.get(chain, ChainMetrics())
+        metrics = self.performance_metrics.chain_metrics.get(chain, ChainMetrics())
         metrics.last_error = str(error)
         metrics.last_updated = time.time()
-        self.metrics.update_chain_metrics(chain, metrics)
+        self.performance_metrics.update_chain_metrics(chain, metrics)
         
         # Attempt to reconnect
         try:
@@ -210,18 +450,18 @@ class CrossChainAnalyzer:
     async def _handle_timeout_error(self, operation: str, error: Exception) -> None:
         """Handle timeout errors"""
         logger.error(f"Timeout during {operation}: {str(error)}")
-        self.metrics.record_operation_time(operation, 30.0)  # Record timeout as 30s
+        self.performance_metrics.record_operation_time(operation, 30.0)  # Record timeout as 30s
     
     async def _handle_validation_error(self, tx_data: Dict[str, Any], error: Exception) -> None:
         """Handle transaction validation errors"""
         logger.error(f"Validation error: {str(error)}, tx_data: {tx_data}")
         chain = tx_data.get('chain', 'unknown')
-        if chain in self.metrics.chain_metrics:
-            metrics = self.metrics.chain_metrics[chain]
+        if chain in self.performance_metrics.chain_metrics:
+            metrics = self.performance_metrics.chain_metrics[chain]
             metrics.failed_txs += 1
             metrics.last_error = str(error)
             metrics.last_updated = time.time()
-            self.metrics.update_chain_metrics(chain, metrics)
+            self.performance_metrics.update_chain_metrics(chain, metrics)
     
     async def _handle_bridge_error(self, source_chain: str, target_chain: str, error: Exception) -> None:
         """Handle bridge-related errors"""
@@ -240,7 +480,7 @@ class CrossChainAnalyzer:
         }
         
         # Compile chain metrics
-        for chain, metrics in self.metrics.chain_metrics.items():
+        for chain, metrics in self.performance_metrics.chain_metrics.items():
             report['chain_metrics'][chain] = {
                 'success_rate': metrics.success_rate,
                 'failed_transactions': metrics.failed_txs,
@@ -256,8 +496,8 @@ class CrossChainAnalyzer:
                 report['overall_health'] = 'degraded'
         
         # Compile operation times
-        for operation in self.metrics.operation_times:
-            avg_time = self.metrics.get_avg_operation_time(operation)
+        for operation in self.performance_metrics.operation_times:
+            avg_time = self.performance_metrics.get_avg_operation_time(operation)
             report['operation_times'][operation] = {
                 'avg_time': avg_time,
                 'status': 'normal' if avg_time < 5.0 else 'slow'
@@ -1215,7 +1455,7 @@ class CrossChainAnalyzer:
             current_block = web3.eth.block_number
             
             # Update metrics
-            metrics = self.metrics.chain_metrics.get(chain, ChainMetrics())
+            metrics = self.performance_metrics.chain_metrics.get(chain, ChainMetrics())
             metrics.total_txs += 1
             
             # Safely access receipt status
@@ -1230,7 +1470,7 @@ class CrossChainAnalyzer:
                 metrics.failed_txs += 1
             
             metrics.last_updated = time.time()
-            self.metrics.update_chain_metrics(chain, metrics)
+            self.performance_metrics.update_chain_metrics(chain, metrics)
             
             # Calculate confirmations
             block_number = receipt_dict.get('blockNumber', 0)
@@ -1440,10 +1680,10 @@ class CrossChainAnalyzer:
     ) -> None:
         """Record metrics from opportunity execution"""
         # Get or create chain metrics
-        chain_metrics = self.metrics.chain_metrics.get(chain)
+        chain_metrics = self.performance_metrics.chain_metrics.get(chain)
         if not chain_metrics:
             chain_metrics = ChainMetrics()
-            self.metrics.chain_metrics[chain] = chain_metrics
+            self.performance_metrics.chain_metrics[chain] = chain_metrics
         
         # Update base metrics
         chain_metrics.total_txs += 1
@@ -1498,6 +1738,7 @@ class CrossChainAnalyzer:
             chain_metrics.sonic_fee_savings = (
                 (chain_metrics.sonic_fee_savings * chain_metrics.total_txs + fee_savings) /
                 (chain_metrics.total_txs + 1)
+            )
         
         # Update timestamp
         chain_metrics.last_updated = time.time()
@@ -1507,11 +1748,11 @@ class CrossChainAnalyzer:
     
     def get_learning_feedback(self) -> Dict[str, List[Dict[str, Any]]]:
         """Get learning feedback for all chains"""
-        return self.metrics.learning_feedback
+        return self.performance_metrics.learning_feedback
     
     def get_chain_recommendations(self, chain: str) -> List[str]:
         """Get latest recommendations for a chain"""
-        feedback = self.metrics.learning_feedback.get(chain, [])
+        feedback = self.performance_metrics.learning_feedback.get(chain, [])
         if not feedback:
             return []
         return feedback[-1].get('recommendations', []) 

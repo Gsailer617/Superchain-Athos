@@ -1,0 +1,181 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "DEX Configuration Schema",
+    "description": "Schema for DEX configuration in the Flashing Base project",
+    "type": "object",
+    "required": ["version", "last_updated"],
+    "properties": {
+        "version": {
+            "type": "string",
+            "description": "Version of the DEX configuration"
+        },
+        "last_updated": {
+            "type": "string",
+            "description": "Date when the configuration was last updated",
+            "format": "date"
+        },
+        "$schema": {
+            "type": "string",
+            "description": "JSON schema reference"
+        }
+    },
+    "additionalProperties": {
+        "type": "object",
+        "required": ["name", "chain", "type"],
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "DEX name"
+            },
+            "factory_address": {
+                "type": "string",
+                "description": "DEX factory contract address",
+                "pattern": "^0x[a-fA-F0-9]{40}$"
+            },
+            "router_address": {
+                "type": "string",
+                "description": "DEX router contract address",
+                "pattern": "^0x[a-fA-F0-9]{40}$"
+            },
+            "vault_address": {
+                "type": "string",
+                "description": "DEX vault contract address (for Balancer-style DEXes)",
+                "pattern": "^0x[a-fA-F0-9]{40}$"
+            },
+            "quoter_address": {
+                "type": "string",
+                "description": "DEX quoter contract address (for Uniswap V3-style DEXes)",
+                "pattern": "^0x[a-fA-F0-9]{40}$"
+            },
+            "fee_tiers": {
+                "type": "array",
+                "description": "Available fee tiers",
+                "items": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "min_liquidity_usd": {
+                "type": "number",
+                "description": "Minimum liquidity in USD for considering a pool",
+                "minimum": 0
+            },
+            "max_slippage": {
+                "type": "number",
+                "description": "Maximum allowed slippage",
+                "minimum": 0,
+                "maximum": 1
+            },
+            "chain": {
+                "type": "string",
+                "description": "Chain on which this DEX exists"
+            },
+            "type": {
+                "type": "string",
+                "description": "Type of DEX",
+                "enum": ["dex", "lending", "aggregator"]
+            },
+            "slug": {
+                "type": "string",
+                "description": "Slug identifier for the DEX"
+            },
+            "pools": {
+                "type": "object",
+                "description": "Specific pools for DEXes like Curve",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["address", "coins"],
+                    "properties": {
+                        "address": {
+                            "type": "string",
+                            "description": "Pool contract address",
+                            "pattern": "^0x[a-fA-F0-9]{40}$"
+                        },
+                        "coins": {
+                            "type": "array",
+                            "description": "Tokens in the pool",
+                            "items": {
+                                "type": "object",
+                                "required": ["symbol", "address"],
+                                "properties": {
+                                    "symbol": {
+                                        "type": "string",
+                                        "description": "Token symbol"
+                                    },
+                                    "address": {
+                                        "type": "string",
+                                        "description": "Token address",
+                                        "pattern": "^0x[a-fA-F0-9]{40}$"
+                                    }
+                                }
+                            }
+                        },
+                        "fee": {
+                            "type": "number",
+                            "description": "Pool fee",
+                            "minimum": 0,
+                            "maximum": 1
+                        }
+                    }
+                }
+            },
+            "markets": {
+                "type": "object",
+                "description": "Lending markets for lending protocols",
+                "additionalProperties": {
+                    "type": "object",
+                    "required": ["address", "collateral", "debt"],
+                    "properties": {
+                        "address": {
+                            "type": "string",
+                            "description": "Market contract address",
+                            "pattern": "^0x[a-fA-F0-9]{40}$"
+                        },
+                        "collateral": {
+                            "type": "object",
+                            "required": ["symbol", "address"],
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "Collateral token symbol"
+                                },
+                                "address": {
+                                    "type": "string",
+                                    "description": "Collateral token address",
+                                    "pattern": "^0x[a-fA-F0-9]{40}$"
+                                }
+                            }
+                        },
+                        "debt": {
+                            "type": "object",
+                            "required": ["symbol", "address"],
+                            "properties": {
+                                "symbol": {
+                                    "type": "string",
+                                    "description": "Debt token symbol"
+                                },
+                                "address": {
+                                    "type": "string",
+                                    "description": "Debt token address",
+                                    "pattern": "^0x[a-fA-F0-9]{40}$"
+                                }
+                            }
+                        },
+                        "ltv": {
+                            "type": "number",
+                            "description": "Loan-to-value ratio",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "fee": {
+                            "type": "number",
+                            "description": "Market fee",
+                            "minimum": 0,
+                            "maximum": 1
+                        }
+                    }
+                }
+            }
+        }
+    }
+} 

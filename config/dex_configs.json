@@ -1,11 +1,16 @@
 {
+    "$schema": "./schemas/dex_schema.json",
+    "version": "1.0.0",
+    "last_updated": "2024-02-26",
     "baseswap": {
         "name": "BaseSwap",
         "factory_address": "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB",
         "router_address": "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86",
         "fee_tiers": [100, 500, 3000, 10000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex"
     },
     "aerodrome": {
         "name": "Aerodrome",
@@ -13,7 +18,9 @@
         "router_address": "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex"
     },
     "swapbased": {
         "name": "SwapBased",
@@ -21,14 +28,19 @@
         "router_address": "0xaaa3b1F1bd7BCc97fD1917c18ADE665C5D31F066",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex"
     },
     "balancer": {
         "name": "Balancer",
         "vault_address": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 100000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "balancer-v2"
     },
     "uniswap-v3": {
         "name": "Uniswap V3",
@@ -37,7 +49,10 @@
         "quoter_address": "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a",
         "fee_tiers": [100, 500, 3000, 10000],
         "min_liquidity_usd": 100000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "uniswap-v3"
     },
     "sushiswap": {
         "name": "SushiSwap",
@@ -45,7 +60,10 @@
         "router_address": "0x6BDED42c6DA8FD5E8B11852d05692eE20717c7fE",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "sushi"
     },
     "pancakeswap": {
         "name": "PancakeSwap",
@@ -53,7 +71,10 @@
         "router_address": "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86",
         "fee_tiers": [100, 500, 2500, 10000],
         "min_liquidity_usd": 75000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "pancakeswap"
     },
     "curve": {
         "name": "Curve",
@@ -62,15 +83,26 @@
         "fee_tiers": [100, 300, 1000],
         "min_liquidity_usd": 150000,
         "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "curve",
         "pools": {
             "tricrypto": {
                 "address": "0x6C7Fd4321183b542E61Cd519F28Cf5539B7394b4",
-                "coins": ["WETH", "USDC", "WBTC"],
+                "coins": [
+                    {"symbol": "WETH", "address": "0x4200000000000000000000000000000000000006"},
+                    {"symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"},
+                    {"symbol": "tBTC", "address": "0x236aa50979D5f3De3Bd1Eeb40E81137F22ab794b"}
+                ],
                 "fee": 0.0004
             },
             "stableswap": {
                 "address": "0x7aE97042a4A0eB4D1eB370C34F9736c7E0AF2EF0",
-                "coins": ["USDC", "USDbC", "USDT"],
+                "coins": [
+                    {"symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"},
+                    {"symbol": "USDbC", "address": "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"},
+                    {"symbol": "USDT", "address": "0x4A3A6Dd60A34bB2Aba60D73B4C88315E9CeB6A3D"}
+                ],
                 "fee": 0.0001
             }
         }
@@ -82,18 +114,21 @@
         "fee_tiers": [50],
         "min_liquidity_usd": 100000,
         "max_slippage": 0.02,
+        "chain": "base",
+        "type": "lending",
+        "slug": "morpho",
         "markets": {
             "weth_usdc": {
                 "address": "0x7aE97042a4A0eB4D1eB370C34F9736c7E0AF2EF0",
-                "collateral": "WETH",
-                "debt": "USDC",
+                "collateral": {"symbol": "WETH", "address": "0x4200000000000000000000000000000000000006"},
+                "debt": {"symbol": "USDC", "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"},
                 "ltv": 0.85,
                 "fee": 0.0008
             },
             "weth_dai": {
                 "address": "0x6C7Fd4321183b542E61Cd519F28Cf5539B7394b4",
-                "collateral": "WETH",
-                "debt": "DAI",
+                "collateral": {"symbol": "WETH", "address": "0x4200000000000000000000000000000000000006"},
+                "debt": {"symbol": "DAI", "address": "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"},
                 "ltv": 0.85,
                 "fee": 0.0008
             }
@@ -105,7 +140,10 @@
         "router_address": "0x32AED3Bce901DA12ca8489788F3A99fCe1056e14",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "maverick-protocol"
     },
     "synthswap": {
         "name": "SynthSwap",
@@ -113,7 +151,10 @@
         "router_address": "0x7C2c7E7bA4Df5101931bF49C5c2Eb4d9c59D9F0b",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "synthswap"
     },
     "alienbase": {
         "name": "AlienBase",
@@ -121,7 +162,10 @@
         "router_address": "0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "alienbase"
     },
     "velocore": {
         "name": "Velocore",
@@ -129,6 +173,9 @@
         "router_address": "0x85E8262849Cd8479A3Cd0D1DaB5886D51E585E28",
         "fee_tiers": [100, 500, 3000],
         "min_liquidity_usd": 50000,
-        "max_slippage": 0.02
+        "max_slippage": 0.02,
+        "chain": "base",
+        "type": "dex",
+        "slug": "velocore"
     }
 } 

@@ -1,312 +1,464 @@
 """
-Unified metrics system combining Prometheus metrics, performance tracking, and monitoring
+Unified Metrics System
+
+A centralized metrics collection and reporting system that integrates:
+- Performance metrics
+- Risk metrics
+- Bridge/transaction metrics
+- Market metrics
+- Execution metrics
+with standardized export to Prometheus, logging, and dashboard integrations.
 """
 
-from typing import Dict, List, Any, Optional, Union, TypeVar, Set
-from dataclasses import dataclass, field
-from datetime import datetime
-from collections import deque
-import threading
-from prometheus_client import Counter, Histogram, Gauge, CollectorRegistry, REGISTRY
+from typing import Dict, Any, List, Optional, Union, Callable
+import time
 import logging
-import structlog
-from pathlib import Path
+import threading
+import json
+from enum import Enum
+from dataclasses import dataclass, field, asdict
+from prometheus_client import Counter, Gauge, Histogram, Summary, CollectorRegistry, push_to_gateway
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
-T = TypeVar('T')
+# Registry for Prometheus metrics
+REGISTRY = CollectorRegistry()
+
+class MetricType(Enum):
+    """Types of metrics that can be tracked"""
+    COUNTER = "counter"
+    GAUGE = "gauge"
+    HISTOGRAM = "histogram"
+    SUMMARY = "summary"
+    COMPOSITE = "composite"
 
 @dataclass
-class MetricConfig:
-    """Configuration for a metric"""
+class MetricDefinition:
+    """Definition of a metric to be tracked"""
     name: str
     description: str
-    type: str = "gauge"  # gauge, counter, histogram
+    type: MetricType
     labels: List[str] = field(default_factory=list)
-    buckets: Optional[List[float]] = None
+    buckets: Optional[List[float]] = None  # For histograms
+    percentiles: Optional[List[float]] = None  # For summaries
+    unit: str = ""
+    aggregation: str = "last"  # last, sum, avg, min, max
 
 @dataclass
-class PerformanceMetrics:
-    """Performance tracking metrics"""
-    total_trades: int = 0
-    successful_trades: int = 0
-    failed_trades: int = 0
-    total_profit: float = 0.0
-    total_gas_spent: float = 0.0
-    best_trade: Optional[Dict[str, Any]] = None
-    worst_trade: Optional[Dict[str, Any]] = None
+class MetricValue:
+    """Value of a metric at a point in time"""
+    name: str
+    value: Union[float, int]
+    labels: Dict[str, str] = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
 
-class UnifiedMetricsSystem:
-    """Unified system for metrics, performance tracking, and monitoring"""
+class MetricsManager:
+    """Centralized metrics management system"""
     
-    def __init__(
-        self,
-        registry: Optional[CollectorRegistry] = None,
-        max_points: int = 1000,
-        enable_prometheus: bool = True
-    ):
-        """Initialize unified metrics system"""
-        self._registry = registry or REGISTRY
-        self._lock = threading.Lock()
-        self.max_points = max_points
-        self.enable_prometheus = enable_prometheus
-        
-        # Initialize components
-        self._metrics: Dict[str, Union[Counter, Gauge, Histogram]] = {}
-        self._initialize_metrics()
-        
-        # Real-time tracking
-        self.tracking_metrics = {
-            'timestamps': deque(maxlen=max_points),
-            'profits': deque(maxlen=max_points),
-            'confidence_scores': deque(maxlen=max_points),
-            'risk_scores': deque(maxlen=max_points),
-            'gas_prices': deque(maxlen=max_points),
-            'volumes': deque(maxlen=max_points),
-            'slippage': deque(maxlen=max_points),
-            'price_impact': deque(maxlen=max_points),
-            'execution_times': deque(maxlen=max_points)
+    _instance = None
+    
+    @classmethod
+    def get_instance(cls) -> 'MetricsManager':
+        """Get singleton instance"""
+        if cls._instance is None:
+            cls._instance = MetricsManager()
+        return cls._instance
+    
+    def __init__(self):
+        """Initialize metrics manager"""
+        self.metrics_registry: Dict[str, MetricDefinition] = {}
+        self.prometheus_metrics: Dict[str, Any] = {}
+        self.time_series_data: Dict[str, List[MetricValue]] = {}
+        self.callbacks: Dict[str, List[Callable]] = {}
+        self.retention_limit = 10000  # Max points per metric
+        self.export_interval = 60  # Seconds between automated exports
+        self.lock = threading.RLock()
+        self._setup_exporters()
+    
+    def _setup_exporters(self):
+        """Set up automated metric exporters"""
+        self.exporters = {
+            "prometheus": {
+                "enabled": False,
+                "gateway": "localhost:9091",
+                "job": "flashing_base"
+            },
+            "csv": {
+                "enabled": False,
+                "path": "./metrics",
+                "interval": 3600  # Export hourly
+            },
+            "dashboard": {
+                "enabled": True,
+                "endpoint": "/api/metrics"
+            }
         }
         
-        # Performance tracking
-        self.performance = PerformanceMetrics()
+        # Start export thread if any exporters enabled
+        if any(e["enabled"] for e in self.exporters.values()):
+            self._start_export_thread()
+    
+    def _start_export_thread(self):
+        """Start background thread for metric export"""
+        def export_loop():
+            while True:
+                try:
+                    time.sleep(self.export_interval)
+                    self.export_metrics()
+                except Exception as e:
+                    logger.error(f"Error in metrics export: {str(e)}")
         
-        # Analytics storage
-        self.token_analytics: Dict[str, Dict[str, Any]] = {}
-        self.dex_analytics: Dict[str, Dict[str, Any]] = {}
+        thread = threading.Thread(target=export_loop, daemon=True)
+        thread.start()
+    
+    def register_metric(self, definition: MetricDefinition):
+        """Register a new metric"""
+        with self.lock:
+            # Store definition
+            self.metrics_registry[definition.name] = definition
+            
+            # Initialize time series storage
+            if definition.name not in self.time_series_data:
+                self.time_series_data[definition.name] = []
+            
+            # Create Prometheus metric
+            if definition.type == MetricType.COUNTER:
+                self.prometheus_metrics[definition.name] = Counter(
+                    definition.name,
+                    definition.description,
+                    definition.labels,
+                    registry=REGISTRY
+                )
+            elif definition.type == MetricType.GAUGE:
+                self.prometheus_metrics[definition.name] = Gauge(
+                    definition.name,
+                    definition.description,
+                    definition.labels,
+                    registry=REGISTRY
+                )
+            elif definition.type == MetricType.HISTOGRAM:
+                self.prometheus_metrics[definition.name] = Histogram(
+                    definition.name,
+                    definition.description,
+                    definition.labels,
+                    buckets=definition.buckets or Histogram.DEFAULT_BUCKETS,
+                    registry=REGISTRY
+                )
+            elif definition.type == MetricType.SUMMARY:
+                self.prometheus_metrics[definition.name] = Summary(
+                    definition.name,
+                    definition.description,
+                    definition.labels,
+                    registry=REGISTRY
+                )
         
-    def _initialize_metrics(self):
-        """Initialize default Prometheus metrics"""
-        if not self.enable_prometheus:
+    def update_metric(self, name: str, value: Union[float, int], labels: Dict[str, str] = None):
+        """Update a metric value"""
+        with self.lock:
+            if name not in self.metrics_registry:
+                logger.warning(f"Updating unregistered metric: {name}")
             return
             
-        # Protocol metrics
-        self._add_metric(MetricConfig(
-            name="protocol_tvl",
-            description="Protocol TVL in USD",
-            type="gauge",
-            labels=["protocol"]
-        ))
-        self._add_metric(MetricConfig(
-            name="protocol_volume_24h",
-            description="Protocol 24h volume in USD",
-            type="gauge",
-            labels=["protocol"]
-        ))
-        
-        # Performance metrics
-        self._add_metric(MetricConfig(
-            name="trade_success_rate",
-            description="Trade success rate percentage",
-            type="gauge"
-        ))
-        self._add_metric(MetricConfig(
-            name="total_profit",
-            description="Total profit in USD",
-            type="gauge"
-        ))
-        
-        # System metrics
-        self._add_metric(MetricConfig(
-            name="system_resource_usage",
-            description="System resource usage percentage",
-            type="gauge",
-            labels=["resource"]
-        ))
-        
-    def _add_metric(self, config: MetricConfig):
-        """Add a new Prometheus metric"""
-        if not self.enable_prometheus:
-            return
+            labels = labels or {}
+            definition = self.metrics_registry[name]
+            prometheus_metric = self.prometheus_metrics.get(name)
             
-        name = f"defi_{config.name}"
-        
-        if config.type == "gauge":
-            metric = Gauge(
-                name,
-                config.description,
-                config.labels,
-                registry=self._registry
+            # Store in time series
+            metric_value = MetricValue(
+                name=name,
+                value=value,
+                labels=labels,
+                timestamp=time.time()
             )
-        elif config.type == "counter":
-            metric = Counter(
-                name,
-                config.description,
-                config.labels,
-                registry=self._registry
-            )
-        elif config.type == "histogram":
-            metric = Histogram(
-                name,
-                config.description,
-                config.labels,
-                buckets=config.buckets or Histogram.DEFAULT_BUCKETS,
-                registry=self._registry
-            )
-        else:
-            raise ValueError(f"Unknown metric type: {config.type}")
+            self.time_series_data[name].append(metric_value)
             
-        self._metrics[config.name] = metric
+            # Enforce retention limit
+            if len(self.time_series_data[name]) > self.retention_limit:
+                self.time_series_data[name] = self.time_series_data[name][-self.retention_limit:]
+            
+            # Update Prometheus metric
+            if prometheus_metric:
+                if definition.type == MetricType.COUNTER:
+                    # For counters, we increment by the value
+                    if labels:
+                        prometheus_metric.labels(**labels).inc(value)
+                    else:
+                        prometheus_metric.inc(value)
+                elif definition.type == MetricType.GAUGE:
+                    # For gauges, we set the value
+                    if labels:
+                        prometheus_metric.labels(**labels).set(value)
+                    else:
+                        prometheus_metric.set(value)
+                elif definition.type == MetricType.HISTOGRAM:
+                    # For histograms, we observe the value
+                    if labels:
+                        prometheus_metric.labels(**labels).observe(value)
+                    else:
+                        prometheus_metric.observe(value)
+                elif definition.type == MetricType.SUMMARY:
+                    # For summaries, we observe the value
+                    if labels:
+                        prometheus_metric.labels(**labels).observe(value)
+                    else:
+                        prometheus_metric.observe(value)
+            
+            # Notify callbacks
+            if name in self.callbacks:
+                for callback in self.callbacks[name]:
+                    try:
+                        callback(name, value, labels)
+                    except Exception as e:
+                        logger.error(f"Error in metric callback for {name}: {str(e)}")
+    
+    def increment_counter(self, name: str, value: float = 1.0, labels: Dict[str, str] = None):
+        """Increment a counter metric"""
+        self.update_metric(name, value, labels)
+            
+    def set_gauge(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Set a gauge metric"""
+        self.update_metric(name, value, labels)
+    
+    def observe_histogram(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Observe a value for a histogram metric"""
+        self.update_metric(name, value, labels)
+    
+    def observe_summary(self, name: str, value: float, labels: Dict[str, str] = None):
+        """Observe a value for a summary metric"""
+        self.update_metric(name, value, labels)
+    
+    def get_metric_values(
+        self, 
+        name: str, 
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        labels: Dict[str, str] = None
+    ) -> List[MetricValue]:
+        """Get time series values for a metric"""
+        with self.lock:
+            if name not in self.time_series_data:
+                return []
+            
+            values = self.time_series_data[name]
+            
+            # Filter by time range
+            if start_time is not None:
+                values = [v for v in values if v.timestamp >= start_time]
+            if end_time is not None:
+                values = [v for v in values if v.timestamp <= end_time]
+            
+            # Filter by labels
+            if labels:
+                values = [
+                    v for v in values if all(
+                        k in v.labels and v.labels[k] == labels[k]
+                        for k in labels
+                    )
+                ]
+            
+            return values
+    
+    def register_callback(self, metric_name: str, callback: Callable):
+        """Register a callback for metric updates"""
+        with self.lock:
+            if metric_name not in self.callbacks:
+                self.callbacks[metric_name] = []
+            self.callbacks[metric_name].append(callback)
+    
+    def export_metrics(self):
+        """Export metrics to configured exporters"""
+        with self.lock:
+            # Export to Prometheus if enabled
+            if self.exporters["prometheus"]["enabled"]:
+                push_to_gateway(
+                    self.exporters["prometheus"]["gateway"],
+                    job=self.exporters["prometheus"]["job"],
+                    registry=REGISTRY
+                )
+                
+            # Export to CSV if enabled
+            if self.exporters["csv"]["enabled"]:
+                self._export_to_csv()
+    
+    def _export_to_csv(self):
+        """Export metrics to CSV files"""
+        import os
+        from pathlib import Path
         
-    def update_metrics(self, metrics: Dict[str, Any]):
-        """Update real-time metrics"""
-        with self._lock:
-            timestamp = datetime.now()
-            self.tracking_metrics['timestamps'].append(timestamp)
-            
-            for key, value in metrics.items():
-                if key in self.tracking_metrics:
-                    self.tracking_metrics[key].append(value)
-                    
-            # Update Prometheus metrics if enabled
-            if self.enable_prometheus:
-                self._update_prometheus_metrics(metrics)
-                
-    def record_trade(self, trade_data: Dict[str, Any]):
-        """Record trade performance"""
-        with self._lock:
-            self.performance.total_trades += 1
-            
-            if trade_data.get('success', False):
-                self.performance.successful_trades += 1
-                profit = trade_data.get('profit', 0)
-                self.performance.total_profit += profit
-                
-                if (self.performance.best_trade is None or 
-                    profit > self.performance.best_trade.get('profit', float('-inf'))):
-                    self.performance.best_trade = trade_data
-                    
-                if (self.performance.worst_trade is None or 
-                    profit < self.performance.worst_trade.get('profit', float('inf'))):
-                    self.performance.worst_trade = trade_data
-            else:
-                self.performance.failed_trades += 1
-                
-            self.performance.total_gas_spent += trade_data.get('gas_cost', 0)
-            
-            # Update analytics
-            self._update_token_analytics(trade_data)
-            self._update_dex_analytics(trade_data)
-            
-    def _update_token_analytics(self, trade_data: Dict[str, Any]):
-        """Update token-specific analytics"""
-        token = trade_data.get('token', '')
-        if not token:
-            return
-            
-        if token not in self.token_analytics:
-            self.token_analytics[token] = {
-                'trades': 0,
-                'volume': 0,
-                'profit': 0,
-                'success_rate': 0
-            }
-            
-        stats = self.token_analytics[token]
-        stats['trades'] += 1
-        stats['volume'] += trade_data.get('volume', 0)
-        stats['profit'] += trade_data.get('profit', 0)
-        stats['success_rate'] = (
-            stats.get('success_rate', 0) * (stats['trades'] - 1) + 
-            int(trade_data.get('success', False))
-        ) / stats['trades']
+        export_path = Path(self.exporters["csv"]["path"])
+        os.makedirs(export_path, exist_ok=True)
         
-    def _update_dex_analytics(self, trade_data: Dict[str, Any]):
-        """Update DEX-specific analytics"""
-        dex = trade_data.get('dex', '')
-        if not dex:
-            return
-            
-        if dex not in self.dex_analytics:
-            self.dex_analytics[dex] = {
-                'trades': 0,
-                'volume': 0,
-                'profit': 0,
-                'success_rate': 0,
-                'avg_gas': 0
-            }
-            
-        stats = self.dex_analytics[dex]
-        stats['trades'] += 1
-        stats['volume'] += trade_data.get('volume', 0)
-        stats['profit'] += trade_data.get('profit', 0)
-        stats['success_rate'] = (
-            stats.get('success_rate', 0) * (stats['trades'] - 1) + 
-            int(trade_data.get('success', False))
-        ) / stats['trades']
-        stats['avg_gas'] = (
-            stats.get('avg_gas', 0) * (stats['trades'] - 1) + 
-            trade_data.get('gas_cost', 0)
-        ) / stats['trades']
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-    def _update_prometheus_metrics(self, metrics: Dict[str, Any]):
-        """Update Prometheus metrics"""
-        if not self.enable_prometheus:
-            return
-            
-        try:
-            # Update success rate
-            if 'trade_success_rate' in self._metrics:
-                success_rate = (
-                    self.performance.successful_trades / 
-                    max(self.performance.total_trades, 1)
-                ) * 100
-                self._metrics['trade_success_rate'].set(success_rate)
+        for name, values in self.time_series_data.items():
+            if not values:
+                continue
                 
-            # Update total profit
-            if 'total_profit' in self._metrics:
-                self._metrics['total_profit'].set(self.performance.total_profit)
-                
-            # Update other metrics
-            for name, value in metrics.items():
-                if name in self._metrics:
-                    metric = self._metrics[name]
-                    if isinstance(metric, Gauge):
-                        metric.set(value)
-                    elif isinstance(metric, Counter):
-                        metric.inc(value)
-                    elif isinstance(metric, Histogram):
-                        metric.observe(value)
-                        
-        except Exception as e:
-            logger.error(f"Error updating Prometheus metrics: {str(e)}")
+            # Convert to DataFrame
+            data = []
+            for v in values:
+                row = {
+                    "timestamp": v.timestamp,
+                    "value": v.value
+                }
+                row.update(v.labels)
+                data.append(row)
             
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Get current performance summary"""
-        with self._lock:
+            df = pd.DataFrame(data)
+            
+            # Save to CSV
+            file_path = export_path / f"{name}_{timestamp}.csv"
+            df.to_csv(file_path, index=False)
+    
+    def get_metric_stats(
+        self,
+        name: str,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None,
+        labels: Dict[str, str] = None
+    ) -> Dict[str, float]:
+        """Get statistical summary of a metric"""
+        values = self.get_metric_values(name, start_time, end_time, labels)
+        
+        if not values:
             return {
-                'total_trades': self.performance.total_trades,
-                'success_rate': (
-                    self.performance.successful_trades / 
-                    max(self.performance.total_trades, 1)
-                ) * 100,
-                'total_profit': self.performance.total_profit,
-                'total_gas_spent': self.performance.total_gas_spent,
-                'net_profit': (
-                    self.performance.total_profit - 
-                    self.performance.total_gas_spent
-                ),
-                'best_trade': self.performance.best_trade,
-                'worst_trade': self.performance.worst_trade
+                "count": 0,
+                "sum": 0.0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+                "stddev": 0.0
             }
-            
-    def get_token_analytics(self, token: Optional[str] = None) -> Dict[str, Any]:
-        """Get token analytics"""
-        with self._lock:
-            if token:
-                return self.token_analytics.get(token, {})
-            return self.token_analytics
-            
-    def get_dex_analytics(self, dex: Optional[str] = None) -> Dict[str, Any]:
-        """Get DEX analytics"""
-        with self._lock:
-            if dex:
-                return self.dex_analytics.get(dex, {})
-            return self.dex_analytics
-            
-    def get_tracking_metrics(self) -> Dict[str, Any]:
-        """Get current tracking metrics"""
-        with self._lock:
+        
+        raw_values = [v.value for v in values]
+        
             return {
-                key: list(value) for key, value in self.tracking_metrics.items()
-            } 
+            "count": len(raw_values),
+            "sum": sum(raw_values),
+            "mean": np.mean(raw_values),
+            "min": min(raw_values),
+            "max": max(raw_values),
+            "stddev": np.std(raw_values)
+        }
+
+# ---- Integration Points ----
+
+# Bridge metrics
+def register_bridge_metrics():
+    """Register common bridge metrics"""
+    manager = MetricsManager.get_instance()
+    
+    # Transaction metrics
+    manager.register_metric(MetricDefinition(
+        name="bridge_txs_total",
+        description="Total number of bridge transactions",
+        type=MetricType.COUNTER,
+        labels=["bridge", "source_chain", "target_chain", "token", "status"]
+    ))
+    
+    # Gas metrics
+    manager.register_metric(MetricDefinition(
+        name="bridge_gas_cost",
+        description="Gas cost for bridge transactions",
+        type=MetricType.HISTOGRAM,
+        labels=["bridge", "source_chain", "target_chain"],
+        buckets=[10, 50, 100, 200, 500, 1000, 2000, 5000]
+    ))
+    
+    # Time metrics
+    manager.register_metric(MetricDefinition(
+        name="bridge_time_seconds",
+        description="Time for bridge transactions in seconds",
+        type=MetricType.HISTOGRAM,
+        labels=["bridge", "source_chain", "target_chain"],
+        buckets=[60, 300, 600, 1800, 3600, 7200, 14400]
+    ))
+    
+    # Success rate
+    manager.register_metric(MetricDefinition(
+        name="bridge_success_rate",
+        description="Success rate for bridge transactions",
+        type=MetricType.GAUGE,
+        labels=["bridge", "source_chain", "target_chain"]
+    ))
+    
+    # Liquidity
+    manager.register_metric(MetricDefinition(
+        name="bridge_liquidity",
+        description="Bridge liquidity",
+        type=MetricType.GAUGE,
+        labels=["bridge", "chain", "token"]
+    ))
+
+# Market metrics
+def register_market_metrics():
+    """Register common market metrics"""
+    manager = MetricsManager.get_instance()
+    
+    # Price metrics
+    manager.register_metric(MetricDefinition(
+        name="token_price_usd",
+        description="Token price in USD",
+        type=MetricType.GAUGE,
+        labels=["token", "chain"]
+    ))
+    
+    # Volatility metrics
+    manager.register_metric(MetricDefinition(
+        name="token_volatility",
+        description="Token price volatility",
+        type=MetricType.GAUGE,
+        labels=["token", "chain", "timeframe"]
+    ))
+    
+    # Liquidity metrics
+    manager.register_metric(MetricDefinition(
+        name="market_liquidity",
+        description="Market liquidity",
+        type=MetricType.GAUGE,
+        labels=["token", "chain", "dex"]
+    ))
+
+# Risk metrics
+def register_risk_metrics():
+    """Register common risk metrics"""
+    manager = MetricsManager.get_instance()
+    
+    # Overall risk
+    manager.register_metric(MetricDefinition(
+        name="overall_risk_score",
+        description="Overall risk score",
+        type=MetricType.GAUGE,
+        labels=["component", "entity"]
+    ))
+    
+    # Component risks
+    manager.register_metric(MetricDefinition(
+        name="component_risk_score",
+        description="Component risk score",
+        type=MetricType.GAUGE,
+        labels=["component", "entity", "risk_type"]
+    ))
+    
+    # Risk events
+    manager.register_metric(MetricDefinition(
+        name="risk_events_total",
+        description="Total risk events",
+        type=MetricType.COUNTER,
+        labels=["level", "type", "entity"]
+    ))
+
+# Initialize all standard metrics
+def initialize_metrics():
+    """Initialize all standard metrics"""
+    register_bridge_metrics()
+    register_market_metrics()
+    register_risk_metrics()
+
+# Get a shared metrics manager instance
+def get_metrics_manager() -> MetricsManager:
+    """Get the shared metrics manager instance"""
+    return MetricsManager.get_instance() 
